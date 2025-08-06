@@ -36,6 +36,7 @@ options(scipen = 999) # Prevent scientific notation
 # Load data into workspace ---------------------------------------------------
 df<-st_transform(st_read("Data/County_State_National_Municipal.gpkg"), crs = 4326)
 mt<-st_transform(st_read("Data/MIAterminals.gpkg"), crs = 4326) %>% dplyr::select(name)
+mt<-st_sf(geometry = st_union(mt))
 mt$id<-seq(1,nrow(mt),1) # API requires a variable named "id" to pass through the id to the files that are returned, named "searchobjectid" in the file, also need more than one column
 df$id<-seq(1,nrow(df),1) 
 #mt<-st_simplify(st_make_valid(mt),dTolerance = 0.00001)
@@ -178,8 +179,6 @@ tradeapi<-function(dft,s,e,fpath,fname_prefix = "batch_"){ # Function converts s
 # tradeapi(dft = df[14,],s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
 #          e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fpath = "tData/",fname_prefix = "test")
 
-# dgnt<-read_parquet("tData/dgntdgnt_1.parquet")
-
 split_df<-split(df, ceiling(seq_len(nrow(df))/20)) # api returns 404 error if even one polygon in the batch has a problem
 
 plan(sequential)
@@ -187,7 +186,7 @@ plan(sequential)
 set.seed(12)
 
 system.time(future_imap(
-  split_df[4], # split_df[3:length(split_df)]
+  split_df, # split_df[3:length(split_df)]
   function(data, index) {
     cat("Processing index:", index, "\n")
     tradeapi(
@@ -308,10 +307,10 @@ geosearchapi<-function(dft,s,e,fname){ # Function converts sf object to json, pa
   write_parquet(xp, paste0("tData/",fname,".parquet")) # Write to parquet file to save space, versus csv
 }
 
-geosearchapi(mt, s = as.numeric(as.POSIXct("2024-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
-         e = as.numeric(as.POSIXct("2024-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fname = "Airportvisittrends2024") # 2024
+geosearchapi(mt, s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
+         e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fname = "Airportvisittrends2023_allterminals") # 2023
 
-mtdf<-read_parquet("tData/Airportvisittrends20220801_20250531.parquet")
+mtdf<-read_parquet("tData/Airportvisittrends2023_allterminals.parquet")
 
 # Identifying all pings for ids observed in the airport terminal
 
@@ -382,12 +381,33 @@ polapi<-function(ids,s,e,fpath,fname_prefix = "batch_"){
   
   file_name<-sub("\\?.*", "", basename(aws_s3_link)) # Extracting the file name
   
-  downloaded_files<-lapply(seq_along(aws_s3_link), function(i) { # Batch downloading all links returned by the API call. Mode = "wb" is important.
-    file_path<-file.path("tData", file_name[i]) # Construct full path
-    download.file(aws_s3_link[i], destfile = file_path, mode = "wb") # Download file
-    return(file_path) # Return the file path
+  downloaded_files <- lapply(seq_along(aws_s3_link), function(i) {
+    file_path <- file.path("tData", file_name[i])
+    url <- aws_s3_link[i]
+    success <- FALSE
+    attempt <- 1
+    max_attempts <- 5
+    
+    while (!success && attempt <= max_attempts) { # Allowing reattempts if not successful on first attempt at download
+      tryCatch({
+        download.file(url, destfile = file_path, mode = "wb")
+        success <- TRUE
+      }, error = function(e) {
+        message("Attempt ", attempt, " failed for index ", i, ": ", conditionMessage(e))
+        Sys.sleep(5 * attempt)  # Exponential backoff: wait longer each time
+        attempt <<- attempt + 1
+      })
+    }
+    
+    if (!success) {
+      message("Download ultimately failed for index ", i, ": ", url)
+      return(NULL)
+    }
+    
+    return(file_path)
   })
-  downloaded_files<-unlist(downloaded_files)
+  
+  downloaded_files <- unlist(Filter(Negate(is.null), downloaded_files))
   
   xp<-do.call(rbind, # Row bind files into a dataframe
               lapply( # Apply over all elements in a list
@@ -412,7 +432,7 @@ polapi<-function(ids,s,e,fpath,fname_prefix = "batch_"){
     fname<-paste0(fname_prefix, id_hash)
   }
   
-  write_parquet(xp, paste0(fpath,fname,".parquet")) # Write to parquet file to save space, versus csv
+  write_parquet(xp, paste0(fpath,fname,".parquet"), compression = "zstd") # Write to parquet file to save space, versus csv
 }
 
 split_ids<-unname(split(ids, ceiling(seq_along(ids)/1000))) # Pattern of life api can only handle 1000 registration ids per query
@@ -429,8 +449,8 @@ system.time(future_imap(
     cat("Processing index:", index, "\n")
     polapi(
       data,
-      s = as.numeric(as.POSIXct("2022-08-01 00:00:00.000", tz = "America/New_York")) * 1000,
-      e = as.numeric(as.POSIXct("2025-05-31 23:59:59.999", tz = "America/New_York")) * 1000,
+      s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
+      e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000,
       fpath = "tData/" # Filepath of output
     )
   },
