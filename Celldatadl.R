@@ -12,7 +12,7 @@ for (p in PKG) {
     require(p,character.only = TRUE)}
 }
 
-renv::snapshot()
+#renv::snapshot()
 rm(p,PKG)
 options(scipen = 999) # Prevent scientific notation
 `%ni%`<- Negate(`%in%`) # Useful function
@@ -179,30 +179,30 @@ tradeapi<-function(dft,s,e,fpath,fname_prefix = "batch_"){ # Function converts s
 # tradeapi(dft = df[14,],s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
 #          e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fpath = "tData/",fname_prefix = "test")
 
-split_df<-split(df, ceiling(seq_len(nrow(df))/20)) # api returns 404 error if even one polygon in the batch has a problem
-
-plan(sequential)
-#plan(multisession, workers = 2) # Initializing parallel processing, API can only handle two concurrent connections
-set.seed(12)
-
-system.time(future_imap(
-  split_df, # split_df[3:length(split_df)]
-  function(data, index) {
-    cat("Processing index:", index, "\n")
-    tradeapi(
-      data,
-      s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
-      e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000,
-      fpath = "tData/", # Filepath of output
-      fname_prefix = 2023
-    )
-  },
-  .options = furrr_options(
-    packages = c("R.utils", "httr", "tidyverse", "jsonlite", "sf", "geojsonsf", "lwgeom", "furrr", "arrow"),
-    seed = TRUE
-  ),
-  .progress = TRUE
-))
+# split_df<-split(df, ceiling(seq_len(nrow(df))/20)) # api returns 404 error if even one polygon in the batch has a problem
+# 
+# plan(sequential)
+# #plan(multisession, workers = 2) # Initializing parallel processing, API can only handle two concurrent connections
+# set.seed(12)
+# 
+# system.time(future_imap(
+#   split_df, # split_df[3:length(split_df)]
+#   function(data, index) {
+#     cat("Processing index:", index, "\n")
+#     tradeapi(
+#       data,
+#       s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
+#       e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000,
+#       fpath = "tData/", # Filepath of output
+#       fname_prefix = 2023
+#     )
+#   },
+#   .options = furrr_options(
+#     packages = c("R.utils", "httr", "tidyverse", "jsonlite", "sf", "geojsonsf", "lwgeom", "furrr", "arrow"),
+#     seed = TRUE
+#   ),
+#   .progress = TRUE
+# ))
 
 dfs <- list.files("tData/", full.names = TRUE) %>%
   {\(f) {
@@ -307,10 +307,10 @@ geosearchapi<-function(dft,s,e,fname){ # Function converts sf object to json, pa
   write_parquet(xp, paste0("tData/",fname,".parquet")) # Write to parquet file to save space, versus csv
 }
 
-geosearchapi(mt, s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
-         e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fname = "Airportvisittrends2023_allterminals") # 2023
+# geosearchapi(mt, s = as.numeric(as.POSIXct("2024-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
+#          e = as.numeric(as.POSIXct("2024-12-31 23:59:59.999", tz = "America/New_York")) * 1000, fname = "Airportvisittrends2023_allterminals") # 2024
 
-mtdf<-read_parquet("tData/Airportvisittrends2023_allterminals.parquet")
+mtdf<-read_parquet("tData/Airportvisittrends2024_allterminals.parquet")
 
 # Identifying all pings for ids observed in the airport terminal
 
@@ -435,37 +435,115 @@ polapi<-function(ids,s,e,fpath,fname_prefix = "batch_"){
   write_parquet(xp, paste0(fpath,fname,".parquet"), compression = "zstd") # Write to parquet file to save space, versus csv
 }
 
-split_ids<-unname(split(ids, ceiling(seq_along(ids)/1000))) # Pattern of life api can only handle 1000 registration ids per query
-
-plan(sequential)
-plan(multisession, workers = 2) # Initializing parallel processing, API can only handle two concurrent connections
-set.seed(12)
+# split_ids<-unname(split(ids, ceiling(seq_along(ids)/1000))) # Pattern of life api can only handle 1000 registration ids per query
+# 
+# plan(sequential)
+# plan(multisession, workers = 2) # Initializing parallel processing, API can only handle two concurrent connections
+# set.seed(12)
 
 # polapi(split_ids[[1]],s = as.numeric(as.POSIXct("2022-08-01 00:00:00.000", tz = "America/New_York")) * 1000,e = as.numeric(as.POSIXct("2025-05-31 23:59:59.999", tz = "America/New_York")) * 1000,fpath = "tData/")
 
-system.time(future_imap(
-  split_ids,
-  function(data, index) {
-    cat("Processing index:", index, "\n")
-    polapi(
-      data,
-      s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
-      e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000,
-      fpath = "tData/" # Filepath of output
-    )
-  },
-  .options = furrr_options(
-    packages = c("R.utils", "httr", "tidyverse", "jsonlite", "sf", "geojsonsf", "lwgeom", "furrr", "arrow","digest"),
-    seed = TRUE
-  ),
-  .progress = TRUE
+# system.time(future_imap(
+#   split_ids,
+#   function(data, index) {
+#     cat("Processing index:", index, "\n")
+#     polapi(
+#       data,
+#       s = as.numeric(as.POSIXct("2023-01-01 00:00:00.000", tz = "America/New_York")) * 1000,
+#       e = as.numeric(as.POSIXct("2023-12-31 23:59:59.999", tz = "America/New_York")) * 1000,
+#       fpath = "tData/" # Filepath of output
+#     )
+#   },
+#   .options = furrr_options(
+#     packages = c("R.utils", "httr", "tidyverse", "jsonlite", "sf", "geojsonsf", "lwgeom", "furrr", "arrow","digest"),
+#     seed = TRUE
+#   ),
+#   .progress = TRUE
+# ))
+
+mtdf$date<-as.Date(as.POSIXct(mtdf$TIMESTAMP_EPOCH_MS / 1000, origin = "1970-01-01", tz = "UTC"), tz = "America/New_York")
+
+mtdf<-mtdf %>% # Only keeping latest observation in the day
+              arrange(REGISTRATION_ID, date, desc(TIMESTAMP_EPOCH_MS)) %>%
+              distinct(REGISTRATION_ID, date, .keep_all = TRUE)
+
+haversine_m <- function(lat1, lon1, lat2, lon2) {
+  r <- 6371000
+  to_rad <- pi/180
+  dlat <- (lat2 - lat1) * to_rad
+  dlon <- (lon2 - lon1) * to_rad
+  a <- sin(dlat/2)^2 + cos(lat1*to_rad) * cos(lat2*to_rad) * sin(dlon/2)^2
+  2 * r * asin(pmin(1, sqrt(a)))
+}
+
+filter_parquet_folder <- function( # Reading in only observations within 24 hours into the future for last point seen in the terminal for a registration id on a given day 
+    parquet_dir,
+    ref_df,
+    workers = 4
+) {
+  # 24h windows per anchor (no trimming → overlaps allowed)
+  ref_windows <- ref_df %>%
+    transmute(
+      REGISTRATION_ID,
+      start_ms   = as.numeric(TIMESTAMP_EPOCH_MS),
+      end_ms     = start_ms + 24 * 3600 * 1000,
+      anchor_lat = LATITUDE,
+      anchor_lon = LONGITUDE
+    ) %>%
+    distinct()
+  
+  files <- list.files(parquet_dir, pattern = "^batch_.*\\.parquet$", full.names = TRUE)
+  if (!length(files)) stop("No matching parquet files found")
+  
+  plan(multisession, workers = workers)
+  
+  pieces <- future_map(
+    files,
+    function(f) {
+      ref_tab <- arrow_table(ref_windows) # Arrow objects must be constructed inside the worker
+      
+      tab <- tryCatch(read_parquet(f, as_data_frame = FALSE), error = function(e) NULL)
+      if (is.null(tab) || tab$num_rows == 0L) return(NULL)
+      
+      needed <- c("REGISTRATION_ID", "TIMESTAMP_EPOCH_MS", "LATITUDE", "LONGITUDE")
+      if (!all(needed %in% names(tab))) return(NULL)
+      
+      out <- tab %>%
+        mutate(TIMESTAMP_EPOCH_MS = cast(TIMESTAMP_EPOCH_MS, float64())) %>%
+        inner_join(ref_tab, by = "REGISTRATION_ID") %>%
+        filter(TIMESTAMP_EPOCH_MS > start_ms,
+               TIMESTAMP_EPOCH_MS <= end_ms) %>%
+        mutate(matched_anchor_ms = start_ms,
+               matched_anchor_time = as.POSIXct(matched_anchor_ms/1000, tz = "America/New_York"),
+               matched_anchor_date = as.Date(matched_anchor_time)) %>%
+        select(-start_ms, -end_ms) %>%
+        collect()
+      
+      if (nrow(out)) out else NULL
+      
+      out %>%
+        mutate(
+          dist_km = haversine_m(anchor_lat, anchor_lon, LATITUDE, LONGITUDE)/1000
+        )
+    },
+    .progress = TRUE,
+    .options = furrr_options(seed = TRUE, packages = c("R.utils", "httr", "tidyverse", "jsonlite", "sf", "geojsonsf", "lwgeom", "furrr", "arrow","digest"))
+  )
+  
+  plan(sequential)
+  pieces |> compact() |> bind_rows()
+}
+
+system.time(dds <- filter_parquet_folder(
+  parquet_dir = "tData/",
+  ref_df      = mtdf, 
+  workers     = 10
 ))
 
 
 
+filtered$date<-as.Date(as.POSIXct(filtered$TIMESTAMP_EPOCH_MS / 1000, origin = "1970-01-01", tz = "UTC"), tz = "America/New_York")
 
-
-
-dds<-map_df(list.files("tData/", pattern = "^batch_.*\\.parquet$", full.names = TRUE), read_parquet)
+#dds<-map_df(list.files("tData/", pattern = "^batch_.*\\.parquet$", full.names = TRUE), read_parquet)
 
 rm(ids,api_key,url,dg,geosearchapi,polapi,tradeapi,headers)
