@@ -1,25 +1,33 @@
-# Intro -------------------------------------------------------------------
+# Setup -------------------------------------------------------------------
 rm(list=ls()) # Clears workspace
 
-# install.packages("renv") # Install/call libraries
-# renv::init()
+# # Install/call libraries
+# install.packages("renv") # Run if you have cloned repository and don't already have renv installed
+# renv::restore() # Run once after cloning repository
+# renv::install("package") # Run to install new packages
+# renv::snapshot() # Run after installing new packages
+# renv::init() # Only run when the repository is first created, don't run on cloning an existing repository
 
-PKG<-c("googledrive","sf","tidyverse","httpuv","R.utils","httr","jsonlite","geojsonsf","lwgeom","furrr","arrow","stringr","sandwich","lmtest","fixest","digest","geosphere")
+# Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-for (p in PKG) {
-  if(!require(p,character.only = TRUE)) {  
-    install.packages(p, type = "binary")
-    require(p,character.only = TRUE)}
+pkgs<-c("googledrive","sf","tidyverse","httpuv","R.utils","httr","jsonlite","geojsonsf","lwgeom","furrr","arrow","stringr","sandwich","lmtest","fixest","digest","geosphere")
+
+missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
+if (length(missing)>0) {
+  stop("Missing packages: ", paste(missing, collapse=", "),
+       "\nRun renv::restore()")
 }
 
-#renv::snapshot()
-rm(p,PKG)
+invisible(lapply(pkgs, library, character.only=TRUE))
+rm(pkgs, missing)
+
 options(scipen = 999) # Prevent scientific notation
 `%ni%`<- Negate(`%in%`) # Useful function
 
 # # Download data -----------------------------------------------------------
+### Not currently up to date, need to fix if redownloading mobile device data
 # dir.create(file.path('Data'), recursive = TRUE)
-# folder_url<-"https://drive.google.com/open?id=15amwG3br43cpU9MS8gghNcYhljHoi52I"
+# folder_url<-"https://drive.google.com/open?id=1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux"
 # folder<-drive_get(as_id(folder_url))
 # files<-drive_ls(folder)
 # dl<-function(files){
