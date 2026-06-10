@@ -22,10 +22,12 @@ flowchart LR
   end
   subgraph analysis[Analysis]
     F["Stats and analysis.R"]
+    G["Airport_calibration.R"]
   end
 
   D --> E
   E --> F
+  E --> G
   dataprep -.-> data
 
 ```
