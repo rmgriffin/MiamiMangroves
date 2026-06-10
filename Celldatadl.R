@@ -550,7 +550,7 @@ system.time(dds <- filter_parquet_folder(
 
 
 
-filtered$date<-as.Date(as.POSIXct(filtered$TIMESTAMP_EPOCH_MS / 1000, origin = "1970-01-01", tz = "UTC"), tz = "America/New_York")
+#filtered$date<-as.Date(as.POSIXct(filtered$TIMESTAMP_EPOCH_MS / 1000, origin = "1970-01-01", tz = "UTC"), tz = "America/New_York")
 
 #dds<-map_df(list.files("tData/", pattern = "^batch_.*\\.parquet$", full.names = TRUE), read_parquet)
 
