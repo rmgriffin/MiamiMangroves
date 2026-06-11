@@ -21,6 +21,13 @@ if (length(missing)>0) {
 invisible(lapply(pkgs, library, character.only=TRUE))
 rm(pkgs, missing)
 
+
+# Script options ---------------------------------------------------------
+options(tigris_use_cache=TRUE)
+options(osrm.server="http://127.0.0.1:5000/")
+options(osrm.profile="driving")
+
+
 # Download data ----------------------------------------------------------
 # dir.create(file.path('Data'), recursive = TRUE)
 # folder_url<-"https://drive.google.com/open?id=1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux"
@@ -273,10 +280,6 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   )
   
 } else {
-
-  options(tigris_use_cache=TRUE)
-  options(osrm.server="http://127.0.0.1:5000/")
-  options(osrm.profile="driving")
 
   pairs<-dfs |>
     st_drop_geometry() |>
