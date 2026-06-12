@@ -224,46 +224,6 @@ dfst<-dfst |> mutate(timespan_min=(as.numeric(LATEST_OBSERVATION_OF_DAY) - as.nu
   filter(CENSUS_BLOCK_GROUP_ID != "NULL")
 
 
-# Multiple site visits on the same day -----------------------------------
-# df_dups<-dfst %>% # Sites visited together on same day (raw data)
-#   add_count(DEVICEID, DAY_IN_FEATURE, name="n_obs_device_day") %>%
-#   filter(n_obs_device_day > 1) |> 
-#   arrange(DEVICEID)
-
-# poly_dup_compare<-dfst %>% # Comparison of polygon visits that are part of multi-site visits versus the only site visited per day
-#   st_drop_geometry() %>%
-#   count(FEATUREID, Name, Jurisdiction, name="n_total_visits") %>%
-#   left_join(
-#     df_dups %>%
-#       st_drop_geometry() %>%
-#       count(FEATUREID, Name, Jurisdiction, name="n_dup_context_visits"),
-#     by=c("FEATUREID", "Name", "Jurisdiction")
-#   ) %>%
-#   mutate(
-#     n_dup_context_visits=replace_na(n_dup_context_visits, 0L),
-#     pct_dup_context=100 * n_dup_context_visits / n_total_visits
-#   ) %>%
-#   arrange(desc(pct_dup_context), desc(n_dup_context_visits))
-
-# poly_sets<-dfst %>% # Sites visited together on the same day (summary)
-#   sf::st_drop_geometry() %>% # remove this line if dfst is not an sf object
-#   filter(!is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) %>%
-#   mutate(
-#     polygon_name=if_else(is.na(Name), paste0("FEATUREID ", FEATUREID), Name)
-#   ) %>%
-#   distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID, polygon_name) %>%
-#   arrange(DEVICEID, DAY_IN_FEATURE, FEATUREID) %>%
-#   group_by(DEVICEID, DAY_IN_FEATURE) %>%
-#   summarise(
-#     n_polygons=n_distinct(FEATUREID),
-#     polygon_set_chr=paste(FEATUREID[!duplicated(FEATUREID)], collapse=" | "),
-#     polygon_name_chr=paste(polygon_name[!duplicated(FEATUREID)], collapse=" | "),
-#     .groups="drop"
-#   ) %>%
-#   filter(n_polygons > 1) %>%
-#   count(polygon_set_chr, polygon_name_chr, n_polygons, sort=TRUE, name="n_device_days")
-
-
 # Travel distance and time -----------------------------------------------
 travel_distance_path<-"Data/intermediate/travel_distance_results.csv"
 dir.create(dirname(travel_distance_path), recursive=TRUE, showWarnings=FALSE)
