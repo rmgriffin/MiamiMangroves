@@ -25,6 +25,80 @@ rm(pkgs, missing)
 # Load data --------------------------------------------------------------
 source("Data_collation.R")
 
+
+# Device stats -----------------------------------------------------------
+length(unique(dfst$DEVICEID)) # Unique device ids 
+
+dfst |> # Frequencies of repeat visits by device id
+  st_drop_geometry() |>
+  filter(!is.na(DEVICEID)) |>
+  count(DEVICEID, name="n_visits") |>
+  mutate(freq_bin=cut(n_visits, breaks=c(1,2,3,5,10,25,50,100,250,Inf), right=FALSE,
+                      labels=c("1","2","3-4","5-9","10-24","25-49","50-99","100-249","250+"))) |>
+  count(freq_bin, name="n_devices") |>
+  mutate(share_devices=n_devices / sum(n_devices)) |>
+  ggplot(aes(freq_bin, share_devices)) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(share_devices, accuracy=0.1)), vjust=-0.3, size=3) +
+  scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0, 0.1))) +
+  labs(x="Visits per DEVICEID", y="Share of DEVICEIDs")
+
+
+# CBG stats --------------------------------------------------------------
+dfst |> # Frequencies of repeat visits by census block group
+  st_drop_geometry() |>
+  filter(!is.na(CENSUS_BLOCK_GROUP_ID)) |>
+  count(CENSUS_BLOCK_GROUP_ID, name="n_visits") |>
+  mutate(freq_bin=cut(n_visits, breaks=c(1,2,3,5,10,25,50,100,250,500,1000,2500,5000,Inf), right=FALSE,
+                      labels=c("1","2","3-4","5-9","10-24","25-49","50-99","100-249","250-499","500-999","1000-2499","2500-4999","5000+"))) |>
+  count(freq_bin, name="n_cbgs") |>
+  mutate(share_cbgs=n_cbgs / sum(n_cbgs)) |>
+  ggplot(aes(freq_bin, share_cbgs)) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(share_cbgs, accuracy=0.1)), vjust=-0.3, size=3) +
+  scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0, 0.1))) +
+  labs(x="Observations per census block group", y="Share of CBGs")
+
+# Multiple site visits on the same day -----------------------------------
+df_dups<-dfst %>% # Sites visited together on same day (raw data)
+  add_count(DEVICEID, DAY_IN_FEATURE, name="n_obs_device_day") %>%
+  filter(n_obs_device_day > 1) |> 
+  arrange(DEVICEID)
+
+poly_dup_compare<-dfst %>% # Comparison of polygon visits that are part of multi-site visits versus the only site visited per day
+  st_drop_geometry() %>%
+  count(FEATUREID, Name, Jurisdiction, name="n_total_visits") %>%
+  left_join(
+    df_dups %>%
+      st_drop_geometry() %>%
+      count(FEATUREID, Name, Jurisdiction, name="n_dup_context_visits"),
+    by=c("FEATUREID", "Name", "Jurisdiction")
+  ) %>%
+  mutate(
+    n_dup_context_visits=replace_na(n_dup_context_visits, 0L),
+    pct_dup_context=100 * n_dup_context_visits / n_total_visits
+  ) %>%
+  arrange(desc(pct_dup_context), desc(n_dup_context_visits))
+
+poly_sets<-dfst %>% # Sites visited together on the same day (summary)
+  sf::st_drop_geometry() %>% # remove this line if dfst is not an sf object
+  filter(!is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) %>%
+  mutate(
+    polygon_name=if_else(is.na(Name), paste0("FEATUREID ", FEATUREID), Name)
+  ) %>%
+  distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID, polygon_name) %>%
+  arrange(DEVICEID, DAY_IN_FEATURE, FEATUREID) %>%
+  group_by(DEVICEID, DAY_IN_FEATURE) %>%
+  summarise(
+    n_polygons=n_distinct(FEATUREID),
+    polygon_set_chr=paste(FEATUREID[!duplicated(FEATUREID)], collapse=" | "),
+    polygon_name_chr=paste(polygon_name[!duplicated(FEATUREID)], collapse=" | "),
+    .groups="drop"
+  ) %>%
+  filter(n_polygons > 1) %>%
+  count(polygon_set_chr, polygon_name_chr, n_polygons, sort=TRUE, name="n_device_days")
+
+
 # Travel stats -----------------------------------------------------------
 cdf_df<-dfst |>
   st_drop_geometry() |>
