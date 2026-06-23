@@ -24,7 +24,7 @@ rm(pkgs, missing)
 
 # Script options ---------------------------------------------------------
 options(tigris_use_cache=TRUE)
-options(osrm.server="http://127.0.0.1:5000/")
+options(osrm.server="http://127.0.0.1:5000/") # Run in powershell to start OSRM server: docker run --rm -t -i -p 5000:5000 -v osrm_us_data:/data osrm/osrm-backend osrm-routed --max-table-size 10000 /data/us-latest.osrm
 options(osrm.profile="driving")
 
 
