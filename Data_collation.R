@@ -221,7 +221,14 @@ if(file.exists(dds_path)) {
 # Data cleaning ----------------------------------------------------------
 dfst<-dfst |> mutate(timespan_min=(as.numeric(LATEST_OBSERVATION_OF_DAY) - as.numeric(EARLIEST_OBSERVATION_OF_DAY)) / 60) |> # Minutes between earliest and latest time in location
   filter(timespan_min > 5) |> # Dropping observations with gap in latest/earliest less than 5 minutes
-  filter(CENSUS_BLOCK_GROUP_ID != "NULL")
+  mutate(CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)) |>
+  filter( # Filtering out null and water / pseudo / invalid CBG identifiers 
+    !is.na(CENSUS_BLOCK_GROUP_ID),
+    CENSUS_BLOCK_GROUP_ID != "NULL",
+    nchar(CENSUS_BLOCK_GROUP_ID) == 12,
+    substr(CENSUS_BLOCK_GROUP_ID, 12, 12) != "0",
+    substr(CENSUS_BLOCK_GROUP_ID, 6, 11) != "990000"
+  )
 
 
 # Travel distance and time -----------------------------------------------
@@ -241,18 +248,26 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   
 } else {
 
-  pairs<-dfs |>
-    st_drop_geometry() |>
-    mutate(
-      FEATUREID=as.character(FEATUREID),
-      CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
-    ) |>
-    filter(
-      !is.na(FEATUREID),
-      !is.na(CENSUS_BLOCK_GROUP_ID),
-      nchar(CENSUS_BLOCK_GROUP_ID) == 12
-    ) |>
-    distinct(FEATUREID, CENSUS_BLOCK_GROUP_ID)
+  pairs<-tidyr::crossing(
+    FEATUREID=dfst |>
+      st_drop_geometry() |>
+      mutate(FEATUREID=as.character(FEATUREID)) |>
+      filter(!is.na(FEATUREID)) |>
+      distinct(FEATUREID) |>
+      pull(FEATUREID),
+    CENSUS_BLOCK_GROUP_ID=dfst |>
+      st_drop_geometry() |>
+      mutate(CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)) |>
+      filter(
+        !is.na(CENSUS_BLOCK_GROUP_ID),
+        CENSUS_BLOCK_GROUP_ID != "NULL",
+        nchar(CENSUS_BLOCK_GROUP_ID) == 12,
+        substr(CENSUS_BLOCK_GROUP_ID, 12, 12) != "0",
+        substr(CENSUS_BLOCK_GROUP_ID, 6, 11) != "990000"
+      ) |>
+      distinct(CENSUS_BLOCK_GROUP_ID) |>
+      pull(CENSUS_BLOCK_GROUP_ID)
+  )
 
   # unique_feature_cbg <- dfs %>%
   #   select(FEATUREID, CENSUS_BLOCK_GROUP_ID, geometry) %>%
@@ -419,7 +434,13 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
 
   pair_pts<-pairs %>% # Pair table with origin and destination coordinates
     left_join(feature_pts, by="FEATUREID") %>%
-    left_join(cbg_pts, by="CENSUS_BLOCK_GROUP_ID")
+    left_join(cbg_pts, by="CENSUS_BLOCK_GROUP_ID") %>%
+    filter(
+      !is.na(feature_lon),
+      !is.na(feature_lat),
+      !is.na(cbg_lon),
+      !is.na(cbg_lat)
+    )
 
   # missing_features<-pair_pts %>% # Missing coordinate checks
   #   filter(is.na(feature_lon) | is.na(feature_lat)) %>%
@@ -428,14 +449,15 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   # missing_cbgs<-pair_pts %>%
   #   filter(is.na(cbg_lon) | is.na(cbg_lat)) %>%
   #   distinct(CENSUS_BLOCK_GROUP_ID)
-
-  pair_pts<-pair_pts %>%
-    filter(
-      !is.na(feature_lon),
-      !is.na(feature_lat),
-      !is.na(cbg_lon),
-      !is.na(cbg_lat)
-    )
+  
+  print(
+    pair_pts %>%
+      summarise(
+        n_pairs=n(),
+        n_features=n_distinct(FEATUREID),
+        n_cbgs=n_distinct(CENSUS_BLOCK_GROUP_ID)
+      )
+  )
 
   # cbgs_per_feature<-pair_pts %>% # Pair density diagnostics
   #   count(FEATUREID, name="n_cbgs") %>%
@@ -444,12 +466,18 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   # summary(cbgs_per_feature$n_cbgs)
   # max(cbgs_per_feature$n_cbgs)
 
-  get_feature_distances<-function(x, max_destinations=5000) { # OSRM routing function
+  get_distance_batch<-function(cbg_batch, feature_pts) { # OSRM table function: many CBGs x many FEATUREIDs
     
-    feature_id<-unique(x$FEATUREID)
+    src<-cbg_batch %>%
+      transmute(
+        id=as.character(CENSUS_BLOCK_GROUP_ID),
+        lon=cbg_lon,
+        lat=cbg_lat
+      ) %>%
+      as.data.frame() %>%
+      st_as_sf(coords=c("lon", "lat"), crs=4326)
     
-    src<-x %>%
-      slice(1) %>%
+    dst<-feature_pts %>%
       transmute(
         id=as.character(FEATUREID),
         lon=feature_lon,
@@ -458,74 +486,104 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
       as.data.frame() %>%
       st_as_sf(coords=c("lon", "lat"), crs=4326)
     
-    dst_all_df<-x %>%
-      distinct(CENSUS_BLOCK_GROUP_ID, cbg_lon, cbg_lat) %>%
-      transmute(
-        id=as.character(CENSUS_BLOCK_GROUP_ID),
-        lon=cbg_lon,
-        lat=cbg_lat
-      )
-    
-    dst_batches<-split(
-      dst_all_df,
-      ceiling(seq_len(nrow(dst_all_df)) / max_destinations)
-    )
-    
-    map_dfr(dst_batches, function(dst_df) {
-      
-      dst<-dst_df %>%
-        as.data.frame() %>%
-        st_as_sf(coords=c("lon", "lat"), crs=4326)
-      
-      out<-tryCatch(
-        {
-          tab<-osrmTable(
-            src=src,
-            dst=dst,
-            measure=c("duration", "distance")
+    tryCatch(
+      {
+        outbound_tab<-osrmTable(
+          src=src,
+          dst=dst,
+          measure=c("duration", "distance")
+        )
+        
+        return_tab<-osrmTable(
+          src=dst,
+          dst=src,
+          measure=c("duration", "distance")
+        )
+        
+        tidyr::expand_grid(
+          CENSUS_BLOCK_GROUP_ID=cbg_batch$CENSUS_BLOCK_GROUP_ID,
+          FEATUREID=feature_pts$FEATUREID
+        ) %>%
+          mutate(
+            outbound_distance_m=as.vector(t(outbound_tab$distances)),
+            outbound_duration_min=as.vector(t(outbound_tab$durations)),
+            return_distance_m=as.vector(return_tab$distances),
+            return_duration_min=as.vector(return_tab$durations),
+            distance_m=outbound_distance_m + return_distance_m,
+            duration_min=outbound_duration_min + return_duration_min,
+            osrm_success=TRUE,
+            osrm_error=NA_character_
           )
-          
-          tibble(
-            FEATUREID=feature_id,
-            CENSUS_BLOCK_GROUP_ID=dst_df$id,
-            distance_m=as.numeric(tab$distances[1, seq_along(dst_df$id)]),
-            duration_min=as.numeric(tab$durations[1, seq_along(dst_df$id)]),
-            osrm_success=TRUE
-          )
-        },
-        error=function(e) {
-          tibble(
-            FEATUREID=feature_id,
-            CENSUS_BLOCK_GROUP_ID=dst_df$id,
+      },
+      error=function(e) {
+        tidyr::expand_grid(
+          CENSUS_BLOCK_GROUP_ID=cbg_batch$CENSUS_BLOCK_GROUP_ID,
+          FEATUREID=feature_pts$FEATUREID
+        ) %>%
+          mutate(
+            outbound_distance_m=NA_real_,
+            outbound_duration_min=NA_real_,
+            return_distance_m=NA_real_,
+            return_duration_min=NA_real_,
             distance_m=NA_real_,
             duration_min=NA_real_,
             osrm_success=FALSE,
             osrm_error=conditionMessage(e)
           )
-        }
-      )
-      
-      out
-    })
+      }
+    )
   }
 
-  # test_feature_ids<-pair_pts %>% # Small test run
-  #   distinct(FEATUREID) %>%
-  #   slice_head(n=2) %>%
-  #   pull(FEATUREID)
+  cbg_batches<-cbg_pts %>% # CBG batches; each batch gets routed to all FEATUREIDs
+    filter(
+      CENSUS_BLOCK_GROUP_ID %in% unique(pair_pts$CENSUS_BLOCK_GROUP_ID),
+      !is.na(cbg_lon),
+      !is.na(cbg_lat),
+      is.finite(cbg_lon),
+      is.finite(cbg_lat)
+    ) %>%
+    arrange(CENSUS_BLOCK_GROUP_ID) %>%
+    split(ceiling(seq_len(nrow(.)) / 500))
 
-  # distance_test<-pair_pts %>%
-  #   filter(FEATUREID %in% test_feature_ids) %>%
-  #   group_split(FEATUREID) %>%
-  #   map_dfr(~get_feature_distances(.x, max_destinations=5000))
+  feature_pts<-feature_pts %>% # Make sure site points are clean and ordered
+    filter(
+      FEATUREID %in% unique(pair_pts$FEATUREID),
+      !is.na(feature_lon),
+      !is.na(feature_lat),
+      is.finite(feature_lon),
+      is.finite(feature_lat)
+    ) %>%
+    arrange(FEATUREID)
 
-  # distance_test
+  print(tibble(
+    n_cbg_batches=length(cbg_batches),
+    n_cbgs=sum(map_int(cbg_batches, nrow)),
+    n_features=nrow(feature_pts),
+    n_pairs=sum(map_int(cbg_batches, nrow)) * nrow(feature_pts)
+  ))
 
-  system.time(distance_results<-pair_pts %>% # Full run
-    group_split(FEATUREID) %>%
-    map_dfr(~get_feature_distances(.x, max_destinations=5000)))
-    
-  distance_results<-distance_results %>%
+  # test_batch<-get_distance_batch(cbg_batches[[1]] %>% slice_head(n=10), feature_pts %>% slice_head(n=5))
+  # test_batch %>% print(n=50)
+
+  travel_distance_dir<-"Data/intermediate/travel_distance_results"
+  dir.create(travel_distance_dir, recursive=TRUE, showWarnings=FALSE)
+
+  system.time({
+    walk(seq_along(cbg_batches), function(i) {
+      
+      out_path<-file.path(travel_distance_dir, paste0("cbg_batch_", stringr::str_pad(i, width=5, pad="0"), ".parquet"))
+      
+      if(!file.exists(out_path)) {
+        get_distance_batch(cbg_batches[[i]], feature_pts) %>%
+          write_parquet(out_path)
+      }
+      
+      message("Finished CBG batch ", i, " of ", length(cbg_batches))
+    })
+  })
+
+  distance_results<-open_dataset(travel_distance_dir) %>%
+    collect() %>%
     mutate(
       FEATUREID=as.character(FEATUREID),
       CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
@@ -548,7 +606,7 @@ dfst<-dfst %>%
     by=c("FEATUREID", "CENSUS_BLOCK_GROUP_ID")
   )
 
-rm(distance_results,dfs,dds_path,travel_distance_path,pad_cbg)
+rm(dfs,dds_path,travel_distance_path,pad_cbg)
 
 # GIS data ---------------------------------------------------------------
 
