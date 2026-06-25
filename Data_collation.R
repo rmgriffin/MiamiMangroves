@@ -10,7 +10,7 @@ rm(list=ls()) # Clears workspace
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm")
+pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm","tidycensus")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -26,7 +26,9 @@ rm(pkgs, missing)
 options(tigris_use_cache=TRUE)
 options(osrm.server="http://127.0.0.1:5000/") # Run in powershell to start OSRM server: docker run --rm -t -i -p 5000:5000 -v osrm_us_data:/data osrm/osrm-backend osrm-routed --max-table-size 10000 /data/us-latest.osrm
 options(osrm.profile="driving")
-
+api_key_census<-read.csv(file = "APIkeyCensus.csv", header = FALSE)
+api_key_census<-api_key_census$V1
+tidycensus::census_api_key(api_key_census, install=FALSE)
 
 # Download data ----------------------------------------------------------
 # dir.create(file.path('Data'), recursive = TRUE)
@@ -432,6 +434,137 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   if(exists("ct_lookup")) rm(ct_lookup)
   if(exists("ct_cbg_recovered")) rm(ct_cbg_recovered)
 
+  if(Sys.getenv("CENSUS_API_KEY") == "") {
+  stop("Missing Census API key. Set Sys.setenv(CENSUS_API_KEY=...) before ACS calls.")
+  }
+
+  cbg_income_path<-"Data/intermediate/cbg_income_acs5_2023.csv"
+  dir.create(dirname(cbg_income_path), recursive=TRUE, showWarnings=FALSE)
+
+  if(file.exists(cbg_income_path)) { # Adding CBG household income to CBG-FeatureID pairs
+    
+    cbg_income<-read_csv(
+      cbg_income_path,
+      col_types=cols(
+        CENSUS_BLOCK_GROUP_ID=col_character(),
+        med_hh_income=col_double(),
+        med_hh_income_moe=col_double()
+      )
+    )
+    
+  } else {
+    
+    cbg_income_ids<-cbg_pts %>%
+      transmute(
+        CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
+        state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2),
+        county_fips=substr(CENSUS_BLOCK_GROUP_ID, 3, 5),
+        tract_bg=substr(CENSUS_BLOCK_GROUP_ID, 6, 12)
+      ) %>%
+      distinct()
+    
+    get_cbg_income_county<-function(state_fips, county_fips) {
+      tryCatch(
+        tidycensus::get_acs(
+          geography="block group",
+          variables=c(med_hh_income="B19013_001"),
+          state=state_fips,
+          county=county_fips,
+          year=2023,
+          survey="acs5",
+          geometry=FALSE,
+          output="wide"
+        ),
+        error=function(e) {
+          message("ACS income failed for state ", state_fips, ", county ", county_fips, ": ", conditionMessage(e))
+          tibble(
+            GEOID=character(),
+            NAME=character(),
+            med_hh_incomeE=double(),
+            med_hh_incomeM=double()
+          )
+        }
+      )
+    }
+    
+    cbg_income_raw<-cbg_income_ids %>%
+      distinct(state_fips, county_fips) %>%
+      pmap_dfr(~get_cbg_income_county(..1, ..2))
+    
+    cbg_income<-cbg_income_raw %>%
+      transmute(
+        CENSUS_BLOCK_GROUP_ID=as.character(GEOID),
+        med_hh_income=med_hh_incomeE,
+        med_hh_income_moe=med_hh_incomeM
+      ) %>%
+      mutate(
+        med_hh_income=if_else(med_hh_income > 0, med_hh_income, NA_real_)
+      ) %>%
+      semi_join(
+        cbg_income_ids %>% select(CENSUS_BLOCK_GROUP_ID),
+        by="CENSUS_BLOCK_GROUP_ID"
+      )
+    
+    missing_ct_income<-cbg_income_ids %>%
+      select(CENSUS_BLOCK_GROUP_ID, tract_bg) %>%
+      anti_join(cbg_income, by="CENSUS_BLOCK_GROUP_ID") %>%
+      filter(substr(CENSUS_BLOCK_GROUP_ID, 1, 2) == "09")
+    
+    if(nrow(missing_ct_income) > 0) {
+      
+      ct_counties_2023<-counties(
+        state="09",
+        year=2023,
+        cb=TRUE,
+        class="sf"
+      ) %>%
+        st_drop_geometry() %>%
+        transmute(county_fips=substr(GEOID, 3, 5)) %>%
+        distinct()
+      
+      ct_income_raw<-ct_counties_2023 %>%
+        pull(county_fips) %>%
+        map_dfr(~get_cbg_income_county("09", .x))
+      
+      ct_income_lookup<-ct_income_raw %>%
+        transmute(
+          GEOID_2023=as.character(GEOID),
+          tract_bg=substr(GEOID_2023, 6, 12),
+          med_hh_income=med_hh_incomeE,
+          med_hh_income_moe=med_hh_incomeM
+        ) %>%
+        mutate(
+          med_hh_income=if_else(med_hh_income > 0, med_hh_income, NA_real_)
+        )
+      
+      ct_income_recovered<-missing_ct_income %>%
+        left_join(ct_income_lookup, by="tract_bg") %>%
+        add_count(CENSUS_BLOCK_GROUP_ID, name="n_matches") %>%
+        filter(n_matches == 1) %>%
+        transmute(
+          CENSUS_BLOCK_GROUP_ID,
+          med_hh_income,
+          med_hh_income_moe
+        )
+      
+      cbg_income<-bind_rows(cbg_income, ct_income_recovered) %>%
+        distinct(CENSUS_BLOCK_GROUP_ID, .keep_all=TRUE)
+    }
+    
+    write_csv(cbg_income, cbg_income_path)
+  }
+
+  cbg_pts<-cbg_pts %>%
+    left_join(cbg_income, by="CENSUS_BLOCK_GROUP_ID")
+
+  cbg_pts %>%
+    summarise(
+      n_cbgs=n(),
+      n_missing_income=sum(is.na(med_hh_income)),
+      share_missing_income=mean(is.na(med_hh_income))
+    ) %>%
+    print()  
+
   pair_pts<-pairs %>% # Pair table with origin and destination coordinates
     left_join(feature_pts, by="FEATUREID") %>%
     left_join(cbg_pts, by="CENSUS_BLOCK_GROUP_ID") %>%
@@ -500,20 +633,22 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
           measure=c("duration", "distance")
         )
         
-        tidyr::expand_grid(
-          CENSUS_BLOCK_GROUP_ID=cbg_batch$CENSUS_BLOCK_GROUP_ID,
-          FEATUREID=feature_pts$FEATUREID
-        ) %>%
-          mutate(
-            outbound_distance_m=as.vector(t(outbound_tab$distances)),
-            outbound_duration_min=as.vector(t(outbound_tab$durations)),
-            return_distance_m=as.vector(return_tab$distances),
-            return_duration_min=as.vector(return_tab$durations),
-            distance_m=outbound_distance_m + return_distance_m,
-            duration_min=outbound_duration_min + return_duration_min,
-            osrm_success=TRUE,
-            osrm_error=NA_character_
-          )
+      tidyr::expand_grid(
+        CENSUS_BLOCK_GROUP_ID=cbg_batch$CENSUS_BLOCK_GROUP_ID,
+        FEATUREID=feature_pts$FEATUREID
+      ) %>%
+        mutate(
+          med_hh_income=rep(cbg_batch$med_hh_income, each=nrow(feature_pts)),
+          med_hh_income_moe=rep(cbg_batch$med_hh_income_moe, each=nrow(feature_pts)),
+          outbound_distance_m=as.vector(t(outbound_tab$distances)),
+          outbound_duration_min=as.vector(t(outbound_tab$durations)),
+          return_distance_m=as.vector(return_tab$distances),
+          return_duration_min=as.vector(return_tab$durations),
+          distance_m=outbound_distance_m + return_distance_m,
+          duration_min=outbound_duration_min + return_duration_min,
+          osrm_success=TRUE,
+          osrm_error=NA_character_
+        )
       },
       error=function(e) {
         tidyr::expand_grid(
@@ -521,6 +656,8 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
           FEATUREID=feature_pts$FEATUREID
         ) %>%
           mutate(
+            med_hh_income=rep(cbg_batch$med_hh_income, each=nrow(feature_pts)),
+            med_hh_income_moe=rep(cbg_batch$med_hh_income_moe, each=nrow(feature_pts)),
             outbound_distance_m=NA_real_,
             outbound_duration_min=NA_real_,
             return_distance_m=NA_real_,
@@ -606,7 +743,7 @@ dfst<-dfst %>%
     by=c("FEATUREID", "CENSUS_BLOCK_GROUP_ID")
   )
 
-rm(dfs,dds_path,travel_distance_path,pad_cbg)
+rm(dfs,dds_path,travel_distance_path,pad_cbg,api_key_census)
 
 # GIS data ---------------------------------------------------------------
 
