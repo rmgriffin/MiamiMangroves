@@ -174,3 +174,128 @@ server<-function(input, output, session) {
 }
 
 shinyApp(ui, server)
+
+
+# Travel cost model ------------------------------------------------------
+rum_full_path<-"Data/intermediate/rum_full.parquet"
+dir.create(dirname(rum_full_path), recursive=TRUE, showWarnings=FALSE)
+
+if(file.exists(rum_full_path)) {
+
+  rum_full<-read_parquet(rum_full_path)
+
+} else {
+
+  alts<-dfst %>%
+    st_drop_geometry() %>%
+    mutate(FEATUREID=as.character(FEATUREID)) %>%
+    filter(!is.na(FEATUREID)) %>%
+    distinct(FEATUREID, Name, Jurisdiction) %>%
+    arrange(FEATUREID)
+
+  choices <- dfst %>% # Selecting one visit per day based on timespan length over which the device is seen
+    st_drop_geometry() %>%
+    select(DEVICEID, DAY_IN_FEATURE, FEATUREID, CENSUS_BLOCK_GROUP_ID, timespan_min) %>%
+    filter(!is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID), !is.na(CENSUS_BLOCK_GROUP_ID)) %>%
+    mutate(
+      FEATUREID=as.character(FEATUREID),
+      CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
+    ) %>%
+    group_by(DEVICEID, DAY_IN_FEATURE) %>%
+    slice_max(timespan_min, n=1, with_ties=FALSE) %>%
+    ungroup() %>%
+    mutate(choice_id=row_number()) %>%
+    select(choice_id, DEVICEID, DAY_IN_FEATURE, CENSUS_BLOCK_GROUP_ID, chosen_FEATUREID=FEATUREID)
+
+  tibble(
+    n_choices=nrow(choices),
+    n_alts=nrow(alts),
+    n_rum_rows=nrow(choices) * nrow(alts)
+  )
+
+  travel_costs<-distance_results %>%
+    filter(
+      CENSUS_BLOCK_GROUP_ID %in% unique(choices$CENSUS_BLOCK_GROUP_ID),
+      FEATUREID %in% alts$FEATUREID
+    ) %>%
+    select(
+      CENSUS_BLOCK_GROUP_ID,
+      FEATUREID,
+      distance_m,
+      duration_min,
+      med_hh_income,
+      osrm_success
+    ) %>%
+    collect() %>%
+    mutate(
+      CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
+      FEATUREID=as.character(FEATUREID),
+      travel_key=paste(CENSUS_BLOCK_GROUP_ID, FEATUREID, sep="|"),
+      distance_km=distance_m/1000,
+      duration_hr=duration_min/60
+    ) %>%
+    filter(osrm_success, !is.na(distance_km), !is.na(duration_hr)) %>%
+    select(travel_key, distance_km, duration_hr, med_hh_income)
+
+  n_choices<-nrow(choices)
+  n_alts<-nrow(alts)
+
+  choice_i<-rep(seq_len(n_choices), each=n_alts)
+  alt_i<-rep(seq_len(n_alts), times=n_choices)
+
+  travel_i<-match(
+    paste(choices$CENSUS_BLOCK_GROUP_ID[choice_i], alts$FEATUREID[alt_i], sep="|"),
+    travel_costs$travel_key
+  )
+
+  print(system.time({
+    rum_full<-tibble(
+      choice_id=choices$choice_id[choice_i],
+      DEVICEID=choices$DEVICEID[choice_i],
+      DAY_IN_FEATURE=choices$DAY_IN_FEATURE[choice_i],
+      CENSUS_BLOCK_GROUP_ID=choices$CENSUS_BLOCK_GROUP_ID[choice_i],
+      FEATUREID=alts$FEATUREID[alt_i],
+      chosen=as.integer(
+        alts$FEATUREID[alt_i] ==
+          choices$chosen_FEATUREID[choice_i]
+      ),
+      distance_km=travel_costs$distance_km[travel_i],
+      duration_hr=travel_costs$duration_hr[travel_i],
+      med_hh_income=travel_costs$med_hh_income[travel_i]
+    ) %>%
+      filter(
+        !is.na(distance_km),
+        !is.na(duration_hr)
+      )
+  }))
+
+  write_parquet(
+    rum_full,
+    rum_full_path,
+    compression="zstd")
+  
+  rm(choice_i, alt_i, travel_i)
+  gc()
+}
+
+# n_choices<-n_distinct(rum_full$choice_id)
+# n_alts<-n_distinct(rum_full$FEATUREID)
+
+# tibble(
+#   n_choices=n_choices,
+#   n_alts=n_alts,
+#   n_rum_rows=nrow(rum_full)
+# )
+
+# rum_full %>% # Check to see if filtering failed routes removed chosen alternatives or created incomplete choice sets
+#   group_by(choice_id) %>%
+#   summarise(
+#     n_available=n(),
+#     n_chosen=sum(chosen),
+#     .groups="drop"
+#   ) %>%
+#   summarise(
+#     n_choice_sets=n(),
+#     missing_chosen=sum(n_chosen != 1),
+#     incomplete_sets=sum(n_available != n_alts)
+#   )
