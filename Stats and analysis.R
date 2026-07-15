@@ -10,7 +10,7 @@ rm(list=ls()) # Clears workspace
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","arrow","sf","shiny")
+pkgs<-c("tidyverse","arrow","sf","shiny","survival")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -299,3 +299,88 @@ if(file.exists(rum_full_path)) {
 #     missing_chosen=sum(n_chosen != 1),
 #     incomplete_sets=sum(n_available != n_alts)
 #   )
+
+travel_cost_params<-list(
+  auto_cost_per_mile=0.2503, # 2024 AAA marginal driving cost
+  annual_work_hours=2080,    # 40 hours/week * 52 weeks
+  vot_fraction=0.33          # value of travel time as share of hourly income
+)
+
+rum_full<-rum_full %>% # Creating total travel cost
+  mutate(travel_cost_dollars= (distance_km / 1.609344) * travel_cost_params$auto_cost_per_mile +
+      duration_hr * (travel_cost_params$vot_fraction * med_hh_income / travel_cost_params$annual_work_hours))
+
+# rum_full %>% # Percentage of census block groups missing income data
+#   distinct(CENSUS_BLOCK_GROUP_ID, med_hh_income) %>%
+#   summarise(
+#     n_origin_cbgs=n(),
+#     n_missing_income=sum(is.na(med_hh_income)),
+#     pct_missing_income=100 * mean(is.na(med_hh_income))
+#   )
+
+rum_model_base<-rum_full %>%
+  select(choice_id, DEVICEID, FEATUREID, chosen, travel_cost_dollars) %>% # Only essential variables
+  filter(!is.na(travel_cost_dollars), is.finite(travel_cost_dollars)) # Filtering out trips attached to a census block group with no household income info
+
+sample_rum_choices<-function(rum_df, n_choices_sample, seed=1) { # Function for subsetting full_rum dataframe
+  
+  if(!is.null(seed)) set.seed(seed)
+  
+  choice_ids<-rum_df %>%
+    distinct(choice_id)
+  
+  sample_choice_ids<-choice_ids %>%
+    slice_sample(n=min(n_choices_sample, nrow(choice_ids))) %>%
+    pull(choice_id)
+  
+  rum_df %>%
+    filter(choice_id %in% sample_choice_ids)
+}
+
+rum_model_df<-sample_rum_choices(
+  rum_df=rum_model_base,
+  n_choices_sample=50000,
+  seed=1
+)
+
+# rum_model_df %>% # Summary stats/diagnostics
+#   summarise(
+#     n=n(),
+#     n_choices=n_distinct(choice_id),
+#     n_devices=n_distinct(DEVICEID),
+#     n_sites=n_distinct(FEATUREID),
+#     chosen_share=mean(chosen),
+#     missing_cost=sum(is.na(travel_cost_dollars)),
+#     median_cost=median(travel_cost_dollars),
+#     p95_cost=quantile(travel_cost_dollars, 0.95)
+#   )
+
+m1<-clogit(
+  chosen ~ travel_cost_dollars +
+    strata(choice_id) + cluster(DEVICEID),
+  data=rum_model_df,
+  method="efron"
+)
+
+summary(m1)
+
+coef_m1<-coef(m1)["travel_cost_dollars"]
+
+tibble(
+  beta_per_dollar=coef_m1,
+  odds_ratio_per_dollar=exp(coef_m1),
+  pct_change_odds_per_dollar=100 * (exp(coef_m1) - 1),
+  odds_ratio_per_10_dollars=exp(10 * coef_m1),
+  pct_change_odds_per_10_dollars=100 * (exp(10 * coef_m1) - 1)
+)
+
+system.time(m2<-clogit(
+  chosen ~ travel_cost_dollars + factor(FEATUREID) +
+    strata(choice_id) + cluster(DEVICEID),
+  data=rum_model_df,
+  method="efron"
+))
+
+summary(m2)
+
+
