@@ -19,14 +19,15 @@ flowchart LR
   end
   subgraph data[Data]
     E["Data_collation.R"]
+    G["Airport_calibration.R"]
   end
   subgraph analysis[Analysis]
     F["Stats and analysis.R"]
-    G["Airport_calibration.R"]
+    
   end
 
   D --> E
-  E --> F
+  G --> F
   E --> G
   dataprep -.-> data
 
