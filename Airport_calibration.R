@@ -23,7 +23,7 @@ rm(pkgs, missing)
 
 
 # Script options ---------------------------------------------------------
-options(osrm.server="http://127.0.0.1:5000/")
+options(osrm.server="http://127.0.0.1:5000/") # docker run --rm -t -i -p 5000:5000 -v osrm_us_data:/data osrm/osrm-backend osrm-routed --max-table-size 10000 /data/us-latest.osrm
 options(osrm.profile="driving")
 
 
@@ -41,7 +41,7 @@ mia_enplanements_monthly<-tibble( # https://www.miami-airport.com/airport_stats.
   month_name=month.name,
   enplanements=c(
     1418709, # January
-    1346432, # February
+    1310335, # February
     1478927, # March
     1360958, # April
     1354102, # May
@@ -293,7 +293,7 @@ ggplot(conus_dist_margin, aes(x=dist_median_km, y=median_drive_time_margin_hr)) 
   scale_x_log10() +
   labs(
     x="Distance from MIA to fastest ping, km",
-    y="Median buffered drive-time margin, hours")
+    y="Median drive-time margin, hours")
 
 monthly_enplanements_device_data<-fastest_ping_osrm %>%
   mutate(
@@ -316,5 +316,5 @@ mia_enplanements_monthly<-mia_enplanements_monthly %>%
   ) %>%
   mutate(
     device_enplanements=coalesce(device_enplanements, 0),
-    device_share_of_mia=100 * device_enplanements / enplanements
+    enplanementperdevice=enplanements/device_enplanements
   )
