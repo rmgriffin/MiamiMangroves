@@ -318,3 +318,48 @@ mia_enplanements_monthly<-mia_enplanements_monthly %>%
     device_enplanements=coalesce(device_enplanements, 0),
     enplanementperdevice=enplanements/device_enplanements
   )
+
+dfst <- dfst |> # Converting each device day into calibrated device days from enplanement data
+  mutate(.month=as.integer(format(as.Date(DAY_IN_FEATURE), "%m"))) |>
+  left_join(
+    mia_enplanements_monthly |>
+      select(.month=month, calibrated_visits=enplanementperdevice),
+    by=".month"
+  ) |>
+  select(-.month)
+
+
+# Calibration to Oleta River Park data -----------------------------------
+Oleta<-tibble( # https://www.floridastateparks.org/sites/default/files/media/file/SUP-BP%2302-25Oleta%26MizellParkAttendance.pdf
+  year=2024,
+  month=1:12,
+  month_name=month.name,
+  counts=c(
+    20101, # January
+    24379, # February
+    41671, # March
+    41378, # April
+    45629, # May
+    29120, # June
+    30170, # July
+    25947, # August
+    23867, # September
+    15583, # October
+    24149, # November
+    18781 # December
+  )) |> 
+  left_join(dfst |> 
+    filter(Name == "Oleta River State Park") |> 
+    mutate(month=as.integer(format(as.Date(DAY_IN_FEATURE), "%m"))) |>
+    group_by(month) |> 
+    summarise(device_visits = n()),by = "month") |> 
+  mutate(visitorcountperdevice = counts/device_visits)
+
+dfst <- dfst |> # Converting each device day into calibrated device days from Oleta visitation data
+  mutate(month=as.integer(format(as.Date(DAY_IN_FEATURE), "%m"))) |>
+  left_join(
+    Oleta |>
+      select(month, calibrated_visits_Oleta=visitorcountperdevice),
+    by="month"
+  ) |>
+  select(-month)
