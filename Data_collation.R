@@ -745,5 +745,7 @@ dfst<-dfst %>%
 
 rm(dfs,dds_path,travel_distance_path,pad_cbg,api_key_census)
 
+dfst$Name<-str_to_title(dfst$Name)
+
 # GIS data ---------------------------------------------------------------
 
