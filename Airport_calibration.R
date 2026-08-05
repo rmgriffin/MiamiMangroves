@@ -250,21 +250,6 @@ enplanement_by_dist<-fastest_ping_osrm %>%
   ) %>%
   arrange(dist_median_km)
 
-ggplot(enplanement_by_dist, aes(x=dist_median_km, y=p_enplaned)) +
-  geom_line() +
-  geom_point() +
-  geom_text(
-    aes(label=paste0("n=", round(n_classified / 1000, 1), "k")),
-    vjust=-0.7,
-    size=5
-  ) +
-  scale_x_log10() +
-  scale_y_continuous(labels=scales::percent_format()) +
-  labs(
-    x="Distance from MIA to fastest ping, km",
-    y="Share classified as enplaned"
-  )
-
 conus_dist_margin<-fastest_ping_osrm %>%
   filter(dest_region=="CONUS", osrm_status=="Ok") %>%
   mutate(
@@ -280,20 +265,6 @@ conus_dist_margin<-fastest_ping_osrm %>%
     p25_drive_time_margin_hr=quantile(drive_time_margin_hr, 0.25, na.rm=TRUE),
     p75_drive_time_margin_hr=quantile(drive_time_margin_hr, 0.75, na.rm=TRUE),
     .groups="drop")
-
-ggplot(conus_dist_margin, aes(x=dist_median_km, y=median_drive_time_margin_hr)) +
-  geom_hline(yintercept=0, linetype="dashed") +
-  geom_line() +
-  geom_point() +
-  geom_text(
-    aes(label=paste0("n=", round(n / 1000, 1), "k")),
-    vjust=-0.7,
-    size=5
-  ) +
-  scale_x_log10() +
-  labs(
-    x="Distance from MIA to fastest ping, km",
-    y="Median drive-time margin, hours")
 
 monthly_enplanements_device_data<-fastest_ping_osrm %>%
   mutate(
