@@ -78,10 +78,11 @@ local({ # Park stats
     geom_hline(yintercept=max(d$y)+.5, linewidth=.4) +
     geom_hline(yintercept=.5, linewidth=.7) +
     coord_cartesian(xlim=c(-.05,2.75), ylim=c(.3,max(d$y)+1.7), clip="off") +
-    labs(title="Park system summary", subtitle="2024",
+    labs(title="Park sample summary, 2024", 
+         # subtitle="2024",
          caption="Note: Travel distance and time are one-way park-level medians based on outbound routing.") +
     theme_void() +
-    theme(plot.title=element_text(face="bold", size=13),
+    theme(plot.title=element_text(size=13),
           plot.subtitle=element_text(size=10),
           plot.caption=element_text(hjust=0, size=8),
           plot.margin=margin(10,20,10,10))
@@ -120,7 +121,7 @@ dfst |> # Map
 
 selected_ids <- c("93","357","358","68","24","97","353","57","130","100","14","355","122","98","30","96","135","102","134","136","356","1")  # Mangrove FEATUREIDs
 
-dfst |> # Visitor days by park for high and low visitation parks
+dfst |> # Calibrated visitor days by park for high and low visitation parks
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
@@ -162,9 +163,9 @@ dfst |> # Visitor days by park for high and low visitation parks
   ) +
   coord_cartesian(clip="off") +
   labs(
-    x="Annual visitor-days",
+    x="Visitor-days",
     y=NULL,
-    title="Annual visitor-days by site",
+    title="Calibrated visitor-days by site, 2024",
     subtitle="Site rank shown in brackets"
   ) +
   theme_minimal() +
@@ -172,7 +173,7 @@ dfst |> # Visitor days by park for high and low visitation parks
     plot.margin=margin(5.5, 35, 5.5, 5.5)
   )
 
-dfst |> # Observed park site-day visits per device ID, 2024
+dfst |> # Observed visitor-days per device ID, 2024
   st_drop_geometry() |>
   mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))) |>
   filter(year==2024, !is.na(DEVICEID)) |>
@@ -203,15 +204,140 @@ dfst |> # Observed park site-day visits per device ID, 2024
   ) +
   scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0,.1))) +
   labs(
-    x="Park visits per device ID",
+    x="Park visitor-days per device ID",
     y="Share of device IDs",
     fill="Home location",
-    title="Park visits per device ID, 2024"
+    title="Park visitor-days per device ID, 2024"
   ) +
   theme_minimal()
 
+dfst |> # Number of parks visited per device-day
+  st_drop_geometry() |>
+  mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))) |>
+  filter(year==2024, !is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) |>
+  distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID) |>
+  count(DEVICEID, DAY_IN_FEATURE, name="n_parks") |>
+  mutate(n_parks=factor(if_else(n_parks>=6, "6+", as.character(n_parks)),
+                        levels=c("1","2","3","4","5","6+"))) |>
+  count(n_parks, name="n_device_days") |>
+  mutate(share_device_days=n_device_days/sum(n_device_days)) |>
+  ggplot(aes(n_parks, share_device_days)) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(share_device_days, accuracy=.1)),
+            vjust=-.3, size=3) +
+  scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0,.1))) +
+  labs(
+    x="Distinct parks visited in one day",
+    y="Share of device-days",
+    title="Number of parks visited per device-day, 2024"
+  ) +
+  theme_minimal()
+
+dfst |> # Parks most associated with multi-park device-days
+  st_drop_geometry() |>
+  mutate(
+    year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
+    FEATUREID=trimws(as.character(FEATUREID)),
+    Name=if_else(is.na(Name) | Name=="", paste0("FEATUREID ", FEATUREID), Name)
+  ) |>
+  filter(year==2024, !is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) |>
+  distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID, Name, Jurisdiction) |>
+  add_count(DEVICEID, DAY_IN_FEATURE, name="n_parks") |>
+  group_by(FEATUREID, Name, Jurisdiction) |>
+  summarise(
+    total_visits=n(),
+    multi_park_visits=sum(n_parks>1),
+    share_multi_park=mean(n_parks>1),
+    .groups="drop"
+  ) |>
+  filter(total_visits>=100) |>
+  slice_max(share_multi_park, n=20, with_ties=FALSE) |>
+  mutate(site_label=paste0(Name, " [n=", scales::comma(total_visits), "]")) |>
+  ggplot(aes(share_multi_park, reorder(site_label, share_multi_park))) +
+  geom_col() +
+  geom_text(aes(label=scales::percent(share_multi_park, accuracy=.1)),
+            hjust=-.1, size=3) +
+  scale_x_continuous(labels=scales::percent, expand=expansion(mult=c(0,.18))) +
+  coord_cartesian(clip="off") +
+  labs(
+    x="Share of visits occurring on multi-park visitor-days",
+    y=NULL,
+    title="Parks most often included in multi-park visitor-days, 2024",
+    subtitle="Parks with at least 100 observed visits; visitor-day count shown in brackets"
+  ) +
+  theme_minimal() +
+  theme(plot.margin=margin(5.5,35,5.5,5.5))
+
+dfst |> # Most common same-day park pairs
+  st_drop_geometry() |>
+  mutate(
+    year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
+    FEATUREID=trimws(as.character(FEATUREID)),
+    park_name=if_else(is.na(Name) | Name=="", paste0("FEATUREID ", FEATUREID), Name)
+  ) |>
+  filter(year==2024, !is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) |>
+  distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID, park_name) |>
+  group_by(DEVICEID, DAY_IN_FEATURE) |>
+  filter(n()>1) |>
+  summarise(parks=list(sort(unique(park_name))), .groups="drop") |>
+  mutate(pair=map(parks, \(x) combn(x, 2, FUN=\(z) paste(z, collapse=" + ")))) |>
+  select(-parks) |>
+  unnest_longer(pair) |>
+  count(pair, sort=TRUE, name="n_device_days") |>
+  slice_head(n=20) |>
+  ggplot(aes(n_device_days, reorder(pair, n_device_days))) +
+  geom_col() +
+  geom_text(aes(label=scales::comma(n_device_days)), hjust=-.1, size=3) +
+  scale_x_continuous(labels=scales::comma, expand=expansion(mult=c(0,.15))) +
+  coord_cartesian(clip="off") +
+  labs(
+    x="Visitor-days",
+    y=NULL,
+    title="Most common same-day park pairs, 2024",
+    subtitle="Top 20 pairs visited by the same device on the same day"
+  ) +
+  theme_minimal() +
+  theme(plot.margin=margin(5.5,35,5.5,5.5))
+
 
 # Calibration ------------------------------------------------------------
+local({ # Oleta State Park visitors and device stats
+  d<-Oleta |>
+    arrange(month) |>
+    transmute(Month=month_name, Visitors=counts, `Observed device visits`=device_visits,
+              `Visitors per device`=counts/device_visits) |>
+    (\(x) bind_rows(x, tibble(
+      Month="Annual total", Visitors=sum(x$Visitors, na.rm=TRUE),
+      `Observed device visits`=sum(x$`Observed device visits`, na.rm=TRUE),
+      `Visitors per device`=sum(x$Visitors, na.rm=TRUE)/sum(x$`Observed device visits`, na.rm=TRUE))))() |>
+    mutate(y=rev(row_number()), total=Month=="Annual total", shade=row_number()%%2==0,
+           visitors_label=scales::comma(Visitors, accuracy=1),
+           devices_label=scales::comma(`Observed device visits`, accuracy=1),
+           ratio_label=scales::number(`Visitors per device`, accuracy=.1))
+
+  ggplot(d) +
+    geom_rect(data=filter(d, shade, !total), aes(ymin=y-.5, ymax=y+.5),
+              xmin=-.1, xmax=3.2, fill="grey95", inherit.aes=FALSE) +
+    geom_text(aes(0, y, label=Month, fontface=if_else(total, "bold", "plain")), hjust=0, size=3.7) +
+    geom_text(aes(1.2, y, label=visitors_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
+    geom_text(aes(2.25, y, label=devices_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
+    geom_text(aes(3.15, y, label=ratio_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
+    annotate("text", x=c(0,1.2,2.25,3.15), y=max(d$y)+1,
+             label=c("Month","Visitor\ncount","Observed visitor\ndays","Visitors per\nobserved device"),
+             hjust=c(0,1,1,1), fontface="bold", size=3.7) +
+    geom_hline(yintercept=max(d$y)+1.55, linewidth=.7) +
+    geom_hline(yintercept=max(d$y)+.5, linewidth=.4) +
+    geom_hline(yintercept=1.5, linewidth=.4) +
+    geom_hline(yintercept=.5, linewidth=.7) +
+    coord_cartesian(xlim=c(-.1,3.2), ylim=c(.3,max(d$y)+1.7), clip="off") +
+    labs(title="Oleta River State Park visitor counts and device calibration, 2024", 
+         #subtitle="2024",
+         caption="Note: Visitors per observed device equals visitor count divided by observed visitor days.") +
+    theme_void() +
+    theme(plot.title=element_text(size=13), plot.subtitle=element_text(size=10),
+          plot.caption=element_text(hjust=0, size=8), plot.margin=margin(10,15,10,10))
+})
+
 local({ # Miami enplanements and devices
   d<-mia_enplanements_monthly |>
     arrange(month) |>
@@ -301,8 +427,8 @@ local({ # Miami enplanements and devices
       clip="off"
     ) +
     labs(
-      title="MIA passenger enplanements and device calibration",
-      subtitle="2024",
+      title="MIA passenger enplanements and device calibration, 2024",
+      #subtitle="2024",
       caption=paste(
         "Note: Passengers per observed device equals passenger enplanements",
         "divided by observed device enplanements."
@@ -310,7 +436,7 @@ local({ # Miami enplanements and devices
     ) +
     theme_void() +
     theme(
-      plot.title=element_text(face="bold", size=13),
+      plot.title=element_text(size=13),
       plot.subtitle=element_text(size=10),
       plot.caption=element_text(hjust=0, size=8),
       plot.margin=margin(10, 15, 10, 10)
@@ -328,42 +454,6 @@ local({ # Miami enplanements and devices
   # )
 })
 
-local({ # Oleta State Park visitors and device stats
-  d<-Oleta |>
-    arrange(month) |>
-    transmute(Month=month_name, Visitors=counts, `Observed device visits`=device_visits,
-              `Visitors per device`=counts/device_visits) |>
-    (\(x) bind_rows(x, tibble(
-      Month="Annual total", Visitors=sum(x$Visitors, na.rm=TRUE),
-      `Observed device visits`=sum(x$`Observed device visits`, na.rm=TRUE),
-      `Visitors per device`=sum(x$Visitors, na.rm=TRUE)/sum(x$`Observed device visits`, na.rm=TRUE))))() |>
-    mutate(y=rev(row_number()), total=Month=="Annual total", shade=row_number()%%2==0,
-           visitors_label=scales::comma(Visitors, accuracy=1),
-           devices_label=scales::comma(`Observed device visits`, accuracy=1),
-           ratio_label=scales::number(`Visitors per device`, accuracy=.1))
-
-  ggplot(d) +
-    geom_rect(data=filter(d, shade, !total), aes(ymin=y-.5, ymax=y+.5),
-              xmin=-.1, xmax=3.2, fill="grey95", inherit.aes=FALSE) +
-    geom_text(aes(0, y, label=Month, fontface=if_else(total, "bold", "plain")), hjust=0, size=3.7) +
-    geom_text(aes(1.2, y, label=visitors_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    geom_text(aes(2.25, y, label=devices_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    geom_text(aes(3.15, y, label=ratio_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    annotate("text", x=c(0,1.2,2.25,3.15), y=max(d$y)+1,
-             label=c("Month","Visitor\ncount","Observed device\nvisits","Visitors per\nobserved device"),
-             hjust=c(0,1,1,1), fontface="bold", size=3.7) +
-    geom_hline(yintercept=max(d$y)+1.55, linewidth=.7) +
-    geom_hline(yintercept=max(d$y)+.5, linewidth=.4) +
-    geom_hline(yintercept=1.5, linewidth=.4) +
-    geom_hline(yintercept=.5, linewidth=.7) +
-    coord_cartesian(xlim=c(-.1,3.2), ylim=c(.3,max(d$y)+1.7), clip="off") +
-    labs(title="Oleta River State Park visitor counts and device calibration", subtitle="2024",
-         caption="Note: Visitors per observed device equals visitor count divided by observed device visits.") +
-    theme_void() +
-    theme(plot.title=element_text(face="bold", size=13), plot.subtitle=element_text(size=10),
-          plot.caption=element_text(hjust=0, size=8), plot.margin=margin(10,15,10,10))
-})
-
 ggplot( # Share of devices classified as enplaned by distance
   enplanement_by_dist, aes(x=dist_median_km, y=p_enplaned)) +
   geom_line() +
@@ -377,7 +467,10 @@ ggplot( # Share of devices classified as enplaned by distance
   scale_y_continuous(labels=scales::percent_format()) +
   labs(
     x="Distance from MIA to fastest ping, km",
-    y="Share classified as enplaned"
+    y="Share classified as enplaned",
+    title="Share of devices classified as enplaned by distance from MIA",
+    #subtitle="2024",
+    #caption=paste("Note: Passengers per observed device equals passenger enplanements", "divided by observed device enplanements.")
   )
 
 ggplot( # Median net difference in driving vs device time by distance from MIA
@@ -393,11 +486,15 @@ ggplot( # Median net difference in driving vs device time by distance from MIA
   scale_x_log10() +
   labs(
     x="Distance from MIA to fastest ping, km",
-    y="Median drive-time margin, hours")
+    y="Median drive-time margin, hours",
+    title="Median net difference in driving vs device time by distance from MIA",
+    #subtitle="2024",
+    #caption=paste("Note: Passengers per observed device equals passenger enplanements", "divided by observed device enplanements.")
+  )
 
 
 # Home location stats --------------------------------------------------------------
-dfst |> # Frequencies of repeat visits by census block group
+dfst |> # Origin CBG representation in park-visit device data
   st_drop_geometry() |>
   filter(!is.na(CENSUS_BLOCK_GROUP_ID)) |>
   count(CENSUS_BLOCK_GROUP_ID, name="n_visits") |>
@@ -409,22 +506,23 @@ dfst |> # Frequencies of repeat visits by census block group
   geom_col() +
   geom_text(aes(label=scales::percent(share_cbgs, accuracy=0.1)), vjust=-0.3, size=3) +
   scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0, 0.1))) +
-  labs(x="Observations per census block group", y="Share of CBGs")
+  labs(x="Frequency of visitor-days across all parks by CBG", y="Share of CBGs",
+       title = "Frequency of visitor-days to all parks by census block group, 2024" )
 
 dfst |> # Share of visitors by distance band
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-    distance_km=distance_m / 1000,
+    distance_km=outbound_distance_m / 1000,
     distance_band=cut(
       distance_km,
-      breaks=c(0, 5, 10, 25, 50, 100, 250, 500, Inf),
+      breaks=c(0, 5, 10, 25, 50, 100, 250, 500, 1000, Inf),
       right=FALSE,
       labels=c("0-5 km", "5-10 km", "10-25 km", "25-50 km", "50-100 km",
-               "100-250 km", "250-500 km", "500+ km")
+               "100-250 km", "250-500 km", "500-1000 km","1000+ km")
     )
   ) |>
-  filter(year == 2024, !is.na(distance_band)) |>
+  filter(!is.na(distance_band)) |>
   group_by(distance_band) |>
   summarise(
     annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
@@ -439,9 +537,9 @@ dfst |> # Share of visitors by distance band
   geom_text(aes(label=scales::percent(share_visitor_days, accuracy=0.1)), vjust=-0.25, size=3) +
   scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0, 0.12))) +
   labs(
-    x="Travel distance band",
+    x="One-way travel distance band",
     y="Share of annual visitor-days",
-    title="Estimated visitor-days by travel-distance band"
+    title="Estimated visitor-days by one-way travel-distance band"
   ) +
   theme_minimal()
 
@@ -483,12 +581,12 @@ dfst |> # Home location by state
   theme_minimal() +
   theme(plot.margin=margin(5.5, 35, 5.5, 5.5))
 
-dfst |>
+dfst |> # One-way travel-distance distributions for highest- and lowest-visitation parks
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
     FEATUREID=trimws(as.character(FEATUREID)),
-    distance_km=distance_m / 1000
+    distance_km=outbound_distance_m / 1000
   ) |>
   filter(year == 2024, !is.na(distance_km), is.finite(distance_km), distance_km >= 0) |>
   inner_join(
@@ -553,57 +651,54 @@ dfst |>
   labs(
     x="Travel distance, km",
     y=NULL,
-    title="Travel-distance distributions for highest- and lowest-visitation parks",
+    title="One-way travel-distance distributions for highest- and lowest-visitation parks",
     subtitle="Point is median; dark line is IQR; light line is 10th to 90th percentile"
   ) +
   theme_minimal()
 
-dfst |>
+dfst |> # One-way travel-distance distributions for shortest- and furthest-travel-distance parks
   st_drop_geometry() |>
-  mutate(
-    year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-    FEATUREID=trimws(as.character(FEATUREID)),
-    distance_km=distance_m / 1000
-  ) |>
-  filter(year == 2024, !is.na(distance_km), is.finite(distance_km), distance_km >= 0) |>
+  mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
+         FEATUREID=trimws(as.character(FEATUREID)),
+         distance_km=outbound_distance_m/1000) |>
+  filter(year==2024, !is.na(distance_km), is.finite(distance_km), distance_km>=0) |>
   inner_join(
     dfst |>
       st_drop_geometry() |>
-      mutate(
-        year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-        FEATUREID=trimws(as.character(FEATUREID)),
-        distance_km=distance_m / 1000
-      ) |>
-      filter(year == 2024, !is.na(distance_km), is.finite(distance_km), distance_km >= 0) |>
+      mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
+             FEATUREID=trimws(as.character(FEATUREID)),
+             distance_km=outbound_distance_m/1000) |>
+      filter(year==2024, !is.na(distance_km), is.finite(distance_km), distance_km>=0) |>
       group_by(FEATUREID, Name) |>
       summarise(
         median_distance_km=median(distance_km, na.rm=TRUE),
+        annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
         .groups="drop"
       ) |>
+      arrange(desc(annual_visitor_days)) |>
+      mutate(visitation_rank=row_number()) |>
       (\(x) bind_rows(
-        x |>
-          slice_min(median_distance_km, n=15, with_ties=FALSE) |>
+        slice_min(x, median_distance_km, n=15, with_ties=FALSE) |>
           mutate(panel="A. Shortest-distance parks"),
-        x |>
-          slice_max(median_distance_km, n=15, with_ties=FALSE) |>
+        slice_max(x, median_distance_km, n=15, with_ties=FALSE) |>
           mutate(panel="B. Furthest-distance parks")
       ))() |>
-      select(FEATUREID, panel),
+      select(FEATUREID, panel, visitation_rank),
     by="FEATUREID"
   ) |>
-  group_by(panel, FEATUREID, Name) |>
+  group_by(panel, FEATUREID, Name, visitation_rank) |>
   summarise(
-    p10_distance_km=quantile(distance_km, 0.10, na.rm=TRUE),
-    p25_distance_km=quantile(distance_km, 0.25, na.rm=TRUE),
+    p10_distance_km=quantile(distance_km, .10, na.rm=TRUE),
+    p25_distance_km=quantile(distance_km, .25, na.rm=TRUE),
     median_distance_km=median(distance_km, na.rm=TRUE),
-    p75_distance_km=quantile(distance_km, 0.75, na.rm=TRUE),
-    p90_distance_km=quantile(distance_km, 0.90, na.rm=TRUE),
+    p75_distance_km=quantile(distance_km, .75, na.rm=TRUE),
+    p90_distance_km=quantile(distance_km, .90, na.rm=TRUE),
     .groups="drop"
   ) |>
   group_by(panel) |>
   arrange(median_distance_km, .by_group=TRUE) |>
   mutate(
-    site_label=Name,
+    site_label=paste0(Name, " [rank ", visitation_rank, "]"),
     site_label_panel=factor(
       paste(panel, site_label, sep="___"),
       levels=unique(paste(panel, site_label, sep="___"))
@@ -611,65 +706,25 @@ dfst |>
   ) |>
   ungroup() |>
   ggplot(aes(median_distance_km, site_label_panel)) +
-  geom_segment(
-    aes(x=p10_distance_km, xend=p90_distance_km, y=site_label_panel, yend=site_label_panel),
-    alpha=0.25,
-    linewidth=1
-  ) +
-  geom_segment(
-    aes(x=p25_distance_km, xend=p75_distance_km, y=site_label_panel, yend=site_label_panel),
-    linewidth=1.6
-  ) +
+  geom_segment(aes(x=p10_distance_km, xend=p90_distance_km,
+                   y=site_label_panel, yend=site_label_panel),
+               alpha=.25, linewidth=1) +
+  geom_segment(aes(x=p25_distance_km, xend=p75_distance_km,
+                   y=site_label_panel, yend=site_label_panel),
+               linewidth=1.6) +
   geom_point(size=2) +
   facet_wrap(~panel, scales="free_y", ncol=1) +
   scale_y_discrete(labels=\(x) sub(".*___", "", x)) +
-  scale_x_continuous(labels=scales::comma, expand=expansion(mult=c(0.02, 0.06))) +
+  scale_x_continuous(labels=scales::comma, expand=expansion(mult=c(.02,.06))) +
   labs(
     x="Travel distance, km",
     y=NULL,
-    title="Travel-distance distributions for shortest- and furthest-distance parks",
-    subtitle="Point is median; dark line is IQR; light line is 10th to 90th percentile"
+    title="One-way travel-distance distributions for shortest- and furthest-travel-distance parks",
+    subtitle="Point is median; dark line is IQR; light line is 10th to 90th percentile; visitation rank in brackets"
   ) +
   theme_minimal()
 
-# Multiple site visits on the same day -----------------------------------
-df_dups<-dfst %>% # Sites visited together on same day (raw data)
-  add_count(DEVICEID, DAY_IN_FEATURE, name="n_obs_device_day") %>%
-  filter(n_obs_device_day > 1) |> 
-  arrange(DEVICEID)
 
-poly_dup_compare<-dfst %>% # Comparison of polygon visits that are part of multi-site visits versus the only site visited per day
-  st_drop_geometry() %>%
-  count(FEATUREID, Name, Jurisdiction, name="n_total_visits") %>%
-  left_join(
-    df_dups %>%
-      st_drop_geometry() %>%
-      count(FEATUREID, Name, Jurisdiction, name="n_dup_context_visits"),
-    by=c("FEATUREID", "Name", "Jurisdiction")
-  ) %>%
-  mutate(
-    n_dup_context_visits=replace_na(n_dup_context_visits, 0L),
-    pct_dup_context=100 * n_dup_context_visits / n_total_visits
-  ) %>%
-  arrange(desc(pct_dup_context), desc(n_dup_context_visits))
-
-poly_sets<-dfst %>% # Sites visited together on the same day (summary)
-  sf::st_drop_geometry() %>% # remove this line if dfst is not an sf object
-  filter(!is.na(DEVICEID), !is.na(DAY_IN_FEATURE), !is.na(FEATUREID)) %>%
-  mutate(
-    polygon_name=if_else(is.na(Name), paste0("FEATUREID ", FEATUREID), Name)
-  ) %>%
-  distinct(DEVICEID, DAY_IN_FEATURE, FEATUREID, polygon_name) %>%
-  arrange(DEVICEID, DAY_IN_FEATURE, FEATUREID) %>%
-  group_by(DEVICEID, DAY_IN_FEATURE) %>%
-  summarise(
-    n_polygons=n_distinct(FEATUREID),
-    polygon_set_chr=paste(FEATUREID[!duplicated(FEATUREID)], collapse=" | "),
-    polygon_name_chr=paste(polygon_name[!duplicated(FEATUREID)], collapse=" | "),
-    .groups="drop"
-  ) %>%
-  filter(n_polygons > 1) %>%
-  count(polygon_set_chr, polygon_name_chr, n_polygons, sort=TRUE, name="n_device_days")
 
 
 # Travel cost summary stats ----------------------------------------------
