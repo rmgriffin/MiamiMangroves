@@ -10,7 +10,7 @@ rm(list=ls()) # Clears workspace
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm","tidycensus")
+pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm","tidycensus","terra","exactextractr")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -748,4 +748,33 @@ rm(dfs,dds_path,travel_distance_path,pad_cbg,api_key_census)
 dfst$Name<-str_to_title(dfst$Name)
 
 # GIS data ---------------------------------------------------------------
+# Mangroves
+gmw<-rast("Data/GIS_data/Mangroves/Miami_area_gmw_v3_2020.tif") # 2020 Global Mangrove Watch data for Miami 
+df$mangrove_m2<-exact_extract(gmw,df,"sum",coverage_area=TRUE) # Area in m2 of mangrove within each park boundary
+df<-df |> # Mangrove indicator variable
+  mutate(
+    mangrove_presence = as.integer(coalesce(mangrove_m2, 0) > 0)
+  ) |>
+  mutate(
+    mangrove_presence = if_else(
+      Name %in% c(
+        "Kenneth M.Myers Bayside Park",
+        "Icon Bay Park",
+        "Margaret Pace Park",
+        "Miami Rowing Center- Virginia Key Park",
+        "Morningside Island",
+        "Morningside Picnic Island #3",
+        "Morningside Park",
+        "Peacock / K. Myers Park",
+        "Pace Park picnic Islands #1",
+        "Willis Island",
+        "Baywood Park",
+        "Legion Memorial Park",
+        "Little River Pocket Park",
+        "Manatee Bend Park"
+      ),
+      1L,
+      mangrove_presence
+    )
+  )
 
