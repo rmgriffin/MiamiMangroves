@@ -778,3 +778,90 @@ df<-df |> # Mangrove indicator variable
     )
   )
 
+# Park area
+df$park_area_m2 <- as.numeric(st_area(st_transform(df, 26917)))
+
+# Beach
+beach<-st_read("Data/GIS_data/CLC_1670_beaches.gpkg", quiet=TRUE) |> st_zm(drop=TRUE, what="ZM") |>st_make_valid() |> st_transform(26917)
+df <- df |>
+  left_join(
+    st_intersection(
+      st_transform(df |> select(id), 26917),
+      beach
+    ) |>
+      mutate(beach_area_m2=as.numeric(st_area(geom))) |>
+      st_drop_geometry() |>
+      summarise(beach_area_m2=sum(beach_area_m2), .by=id),
+    by="id"
+  ) |>
+  mutate(
+    beach_area_m2=replace_na(beach_area_m2, 0),
+    beach_area_ha=beach_area_m2 / 10000,
+    beach_pct=100 * beach_area_m2 / park_area_m2
+  )
+
+# Canopy
+canopy<-rast("Data/GIS_data/fl_2022_ccap_v2_hires_canopy_crop.tif")
+df$tree_canopy_pct <- exact_extract( # Coverage fraction of tree canopy
+  canopy, max_cells_in_memory=3e+09,
+  st_transform(df, crs(canopy)),
+  function(values, coverage_fraction) {
+    valid <- values %in% c(0, 1, 2)
+    if (!any(valid)) return(NA_real_)
+    100 * sum(coverage_fraction[valid & values == 1], na.rm=TRUE) / # Only tree forest canopy (1), not background (0) or shrub/scrub (2)
+      sum(coverage_fraction[valid], na.rm=TRUE)
+  },
+  progress=TRUE
+)
+
+# Impervious
+impervious<-rast("Data/GIS_data/fl_2022_ccap_v2_hires_impervious_crop.tif")
+df$impervious_pct <- exact_extract(
+  impervious, max_cells_in_memory=3e+09,
+  st_transform(df, crs(impervious)),
+  function(values, coverage_fraction) {
+    valid <- values %in% c(0, 1)
+    if (!any(valid))
+      return(NA_real_)
+    100 *
+      sum(coverage_fraction[valid & values == 1], na.rm=TRUE) /
+      sum(coverage_fraction[valid], na.rm=TRUE)
+  },
+  progress=TRUE
+)
+
+# Island
+
+df<-df |> # Island (boat access only) indicator variable
+  mutate(
+    island = 0
+  ) |>
+  mutate(
+    island = if_else(
+      Name %in% c(
+        "Little Sandspur Island",
+        "Crescent Islands",
+        "Helkers Island",
+        "Quayside Island",
+        "Tern Island",
+        "Morningside Picnic Island #3",
+        "Sandpiper Island",
+        "PELICAN ISLAND",
+        "Pace Park picnic Islands #1",
+        "Willis Island",
+        "Bird Key",
+        "Legion Picnic Island Park #2",
+        "Frigate Island",
+        "Mangrove Island",
+        "Morningside Island",
+        "Pace Park picnic Islands #1",
+        "Flagler Memorial Monument",
+        "Willis Island",
+        "Dinner Key Picnic Islands #4, #5, #6",
+        "Dinner Key Island A",
+        "Biscayne National Park"
+      ),
+      1L,
+      island
+    )
+  )
