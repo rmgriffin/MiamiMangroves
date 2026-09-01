@@ -99,6 +99,9 @@ dfs<-list.files(
 #     n_not_12=sum(nchar(CENSUS_BLOCK_GROUP_ID) != 12, na.rm=TRUE)
 #   )
 
+dfs26<-read_parquet("Data/tdata-combined/202604_202606data_1_68_120_130_357_358.parquet")
+dfs<-rbind(dfs,dfs26)
+
 df<-st_transform(st_read("Data/GIS_data/County_State_National_Municipal_v3.gpkg"), crs = 4326) # Merging to spatial data
 df$id<-seq(1,nrow(df),1)
 
@@ -743,7 +746,7 @@ dfst<-dfst %>%
     by=c("FEATUREID", "CENSUS_BLOCK_GROUP_ID")
   )
 
-rm(dfs,dds_path,travel_distance_path,pad_cbg,api_key_census)
+rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census)
 
 dfst$Name<-str_to_title(dfst$Name)
 
@@ -777,6 +780,7 @@ df<-df |> # Mangrove indicator variable
       mangrove_presence
     )
   )
+rm(gmw)
 
 # Park area
 df$park_area_m2 <- as.numeric(st_area(st_transform(df, 26917)))
@@ -799,6 +803,7 @@ df <- df |>
     beach_area_ha=beach_area_m2 / 10000,
     beach_pct=100 * beach_area_m2 / park_area_m2
   )
+rm(beach)
 
 # Canopy
 canopy<-rast("Data/GIS_data/fl_2022_ccap_v2_hires_canopy_crop.tif")
@@ -813,6 +818,7 @@ df$tree_canopy_pct <- exact_extract( # Coverage fraction of tree canopy
   },
   progress=TRUE
 )
+rm(canopy)
 
 # Impervious
 impervious<-rast("Data/GIS_data/fl_2022_ccap_v2_hires_impervious_crop.tif")
@@ -829,6 +835,7 @@ df$impervious_pct <- exact_extract(
   },
   progress=TRUE
 )
+rm(impervious)
 
 # Island
 
