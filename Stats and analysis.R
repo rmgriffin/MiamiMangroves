@@ -496,7 +496,10 @@ ggplot( # Median net difference in driving vs device time by distance from MIA
 # Home location stats --------------------------------------------------------------
 dfst |> # Origin CBG representation in park-visit device data
   st_drop_geometry() |>
-  filter(!is.na(CENSUS_BLOCK_GROUP_ID)) |>
+  mutate(
+    year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))
+  ) |> 
+  filter(!is.na(CENSUS_BLOCK_GROUP_ID), year == 2024) |>
   count(CENSUS_BLOCK_GROUP_ID, name="n_visits") |>
   mutate(freq_bin=cut(n_visits, breaks=c(1,2,3,5,10,25,50,100,250,500,1000,2500,5000,Inf), right=FALSE,
                       labels=c("1","2","3-4","5-9","10-24","25-49","50-99","100-249","250-499","500-999","1000-2499","2500-4999","5000+"))) |>
@@ -522,7 +525,7 @@ dfst |> # Share of visitors by distance band
                "100-250 km", "250-500 km", "500-1000 km","1000+ km")
     )
   ) |>
-  filter(!is.na(distance_band)) |>
+  filter(!is.na(distance_band), year == 2024) |>
   group_by(distance_band) |>
   summarise(
     annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
