@@ -10,7 +10,7 @@ rm(list=ls()) # Clears workspace
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","arrow","sf","shiny","survival")
+pkgs<-c("tidyverse","arrow","sf","shiny","survival","mapgl")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -88,15 +88,15 @@ local({ # Park stats
           plot.margin=margin(10,20,10,10))
 })
 
-dfst |> # Map 
-  select(FEATUREID, Name, Jurisdiction, geom) |>
+dfst |> # Map of annual visitation
+  dplyr::select(FEATUREID, Name, Jurisdiction, geom) |>
   distinct(FEATUREID, .keep_all=TRUE) |>
   st_as_sf(sf_column_name="geom") |>
   left_join(
     dfst |>
       st_drop_geometry() |>
       mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))) |>
-      filter(year == 2024) |>
+      filter(year==2024) |>
       group_by(FEATUREID) |>
       summarise(
         annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
@@ -106,18 +106,44 @@ dfst |> # Map
       ),
     by="FEATUREID"
   ) |>
-  ggplot() +
-  geom_sf(aes(fill=annual_visitor_days), color="white", linewidth=0.1) +
-  scale_fill_viridis_c(
-    trans="log10",
-    labels=scales::comma,
-    na.value="grey90"
-  ) +
-  labs(
-    fill="Annual visitor-days",
-    title="Estimated annual visitor-days by site"
-  ) +
-  theme_minimal()
+  mutate(
+    visitor_days_class=as.character(cut(
+      annual_visitor_days,
+      breaks=c(-Inf,2500,10000,50000,250000,1000000,Inf),
+      right=FALSE,
+      labels=c("< 2,500","2,500 - 9,999","10,000 - 49,999",
+               "50,000 - 249,999","250,000 - 999,999","1,000,000+")
+    ))
+  ) |>
+  st_transform(4326) |>
+  (\(x) mapgl::maplibre(
+    style=mapgl::openfreemap_style("positron"),
+    bounds=x
+  ) |>
+    mapgl::add_source(id="parks", data=x) |>
+    mapgl::add_fill_layer(
+      id="visitor-days",
+      source="parks",
+      fill_color=mapgl::match_expr(
+        column="visitor_days_class",
+        values=c("< 2,500","2,500 - 9,999","10,000 - 49,999",
+                 "50,000 - 249,999","250,000 - 999,999","1,000,000+"),
+        stops=c("#7FC8E3","#42A5D5","#1F78B4","#155A96","#103E73","#08264F"),
+        default="#bdbdbd"
+      ),
+      fill_opacity=.9,
+      fill_outline_color="white",
+      tooltip="Name"
+    ) |>
+    mapgl::add_legend(
+      "Calibrated visitor-days, 2024",
+      values=c("< 2,500","2,500 - 9,999","10,000 - 49,999",
+               "50,000 - 249,999","250,000 - 999,999","1,000,000+"),
+      colors=c("#7FC8E3","#42A5D5","#1F78B4","#155A96","#103E73","#08264F"),
+      type="categorical",
+      position="bottom-left"
+    )
+  )()
 
 selected_ids <- c("93","357","358","68","24","97","353","57","130","100","14","355","122","98","30","96","135","102","134","136","356","1")  # Mangrove FEATUREIDs
 
