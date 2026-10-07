@@ -22,13 +22,17 @@ flowchart LR
     G["Airport_calibration.R"]
   end
   subgraph analysis[Analysis]
-    F["Stats and analysis.R"]
+    F["Travel_demand.R"]   
+  end
+    subgraph figures[Figures and Tables]
+    H["Figures_tables.R"]
     
   end
 
   D --> E
   G --> F
   E --> G
+  F --> H
   dataprep -.-> data
 
 ```
