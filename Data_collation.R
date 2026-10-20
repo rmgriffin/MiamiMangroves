@@ -308,7 +308,7 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   cbg_poly<-map_dfr(state_fips, function(s) { # Download census block group polygons
     block_groups(
       state=s,
-      year=2023,
+      year=2024,
       cb=TRUE,
       class="sf"
     )
@@ -317,7 +317,7 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
     mutate(GEOID=as.character(GEOID)) %>%
     filter(GEOID %in% pairs$CENSUS_BLOCK_GROUP_ID)
 
-  missing_cbgs_initial<-pairs %>% # Check for CBGs missing from 2023 tigris pull
+  missing_cbgs_initial<-pairs %>% # Check for CBGs missing from 2024 tigris pull
     distinct(CENSUS_BLOCK_GROUP_ID) %>%
     anti_join(
       cbg_poly %>%
@@ -349,9 +349,9 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
 
   if(nrow(missing_ct) > 0) {
     
-    ct_cbg_2023<-block_groups(
+    ct_cbg_2024<-block_groups(
       state="09",
-      year=2023,
+      year=2024,
       cb=TRUE,
       class="sf"
     ) %>%
@@ -364,9 +364,9 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
     ct_lookup<-missing_ct %>%
       select(CENSUS_BLOCK_GROUP_ID, ct_tract_bg) %>%
       left_join(
-        ct_cbg_2023 %>%
+        ct_cbg_2024 %>%
           st_drop_geometry() %>%
-          select(GEOID_2023=GEOID, ct_tract_bg),
+          select(GEOID_2024=GEOID, ct_tract_bg),
         by="ct_tract_bg"
       )
     
@@ -376,11 +376,11 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
     
     print(ct_match_diag)
     
-    ct_cbg_recovered<-ct_cbg_2023 %>%
+    ct_cbg_recovered<-ct_cbg_2024 %>%
       inner_join(
         ct_lookup %>%
-          select(GEOID_2023, CENSUS_BLOCK_GROUP_ID),
-        by=c("GEOID"="GEOID_2023")
+          select(GEOID_2024, CENSUS_BLOCK_GROUP_ID),
+        by=c("GEOID"="GEOID_2024")
       ) %>%
       mutate(GEOID=CENSUS_BLOCK_GROUP_ID) %>%
       select(-CENSUS_BLOCK_GROUP_ID, -ct_tract_bg)
@@ -433,7 +433,7 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
 
   rm(cbg_poly, missing_cbgs_initial, missing_ct)
 
-  if(exists("ct_cbg_2023")) rm(ct_cbg_2023)
+  if(exists("ct_cbg_2024")) rm(ct_cbg_2024)
   if(exists("ct_lookup")) rm(ct_lookup)
   if(exists("ct_cbg_recovered")) rm(ct_cbg_recovered)
 
@@ -441,7 +441,7 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   stop("Missing Census API key. Set Sys.setenv(CENSUS_API_KEY=...) before ACS calls.")
   }
 
-  cbg_income_path<-"Data/intermediate/cbg_income_acs5_2023.csv"
+  cbg_income_path<-"Data/intermediate/cbg_income_acs5_2024.csv"
   dir.create(dirname(cbg_income_path), recursive=TRUE, showWarnings=FALSE)
 
   if(file.exists(cbg_income_path)) { # Adding CBG household income to CBG-FeatureID pairs
@@ -473,7 +473,7 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
           variables=c(med_hh_income="B19013_001"),
           state=state_fips,
           county=county_fips,
-          year=2023,
+          year=2024,
           survey="acs5",
           geometry=FALSE,
           output="wide"
@@ -515,9 +515,9 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
     
     if(nrow(missing_ct_income) > 0) {
       
-      ct_counties_2023<-counties(
+      ct_counties_2024<-counties(
         state="09",
-        year=2023,
+        year=2024,
         cb=TRUE,
         class="sf"
       ) %>%
@@ -525,14 +525,14 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
         transmute(county_fips=substr(GEOID, 3, 5)) %>%
         distinct()
       
-      ct_income_raw<-ct_counties_2023 %>%
+      ct_income_raw<-ct_counties_2024 %>%
         pull(county_fips) %>%
         map_dfr(~get_cbg_income_county("09", .x))
       
       ct_income_lookup<-ct_income_raw %>%
         transmute(
-          GEOID_2023=as.character(GEOID),
-          tract_bg=substr(GEOID_2023, 6, 12),
+          GEOID_2024=as.character(GEOID),
+          tract_bg=substr(GEOID_2024, 6, 12),
           med_hh_income=med_hh_incomeE,
           med_hh_income_moe=med_hh_incomeM
         ) %>%
@@ -749,6 +749,139 @@ dfst<-dfst %>%
 rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census)
 
 dfst$Name<-str_to_title(dfst$Name)
+
+# CBG population ----------------------------------------------------------
+cbg_population_path <- "Data/intermediate/cbg_population_acs5_2024.csv"
+dir.create(dirname(cbg_population_path), recursive=TRUE, showWarnings=FALSE)
+
+cbg_population <- if(file.exists(cbg_population_path)) {
+
+  read_csv(
+    cbg_population_path,
+    col_types=cols(
+      CENSUS_BLOCK_GROUP_ID=col_character(),
+      cbg_population=col_double(),
+      cbg_population_moe=col_double()
+    )
+  )
+
+} else {
+
+  local({
+
+    cbg_population_ids <- dfst %>%
+      st_drop_geometry() %>%
+      distinct(CENSUS_BLOCK_GROUP_ID) %>%
+      transmute(
+        CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
+        state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2),
+        county_fips=substr(CENSUS_BLOCK_GROUP_ID, 3, 5),
+        tract_bg=substr(CENSUS_BLOCK_GROUP_ID, 6, 12)
+      )
+
+    get_cbg_population_county <- function(state_fips, county_fips) {
+      tryCatch(
+        tidycensus::get_acs(
+          geography="block group",
+          variables=c(cbg_population="B01003_001"),
+          state=state_fips,
+          county=county_fips,
+          year=2024,
+          survey="acs5",
+          geometry=FALSE,
+          output="wide"
+        ),
+        error=function(e) {
+          message(
+            "ACS population failed for state ", state_fips,
+            ", county ", county_fips, ": ",
+            conditionMessage(e)
+          )
+
+          tibble(
+            GEOID=character(),
+            NAME=character(),
+            cbg_populationE=double(),
+            cbg_populationM=double()
+          )
+        }
+      )
+    }
+
+    cbg_population <- cbg_population_ids %>%
+      distinct(state_fips, county_fips) %>%
+      pmap_dfr(~get_cbg_population_county(..1, ..2)) %>%
+      transmute(
+        CENSUS_BLOCK_GROUP_ID=as.character(GEOID),
+        cbg_population=cbg_populationE,
+        cbg_population_moe=cbg_populationM
+      ) %>%
+      mutate(
+        cbg_population=if_else(
+          cbg_population >= 0,
+          cbg_population,
+          NA_real_
+        )
+      ) %>%
+      semi_join(
+        cbg_population_ids %>%
+          dplyr::select(CENSUS_BLOCK_GROUP_ID),
+        by="CENSUS_BLOCK_GROUP_ID"
+      )
+
+    missing_ct_population <- cbg_population_ids %>%
+      dplyr::select(CENSUS_BLOCK_GROUP_ID, tract_bg) %>%
+      anti_join(cbg_population, by="CENSUS_BLOCK_GROUP_ID") %>%
+      filter(substr(CENSUS_BLOCK_GROUP_ID, 1, 2) == "09")
+
+    if(nrow(missing_ct_population) > 0) {
+
+      ct_population_lookup <- counties(
+        state="09",
+        year=2024,
+        cb=TRUE,
+        class="sf"
+      ) %>%
+        st_drop_geometry() %>%
+        transmute(county_fips=substr(GEOID, 3, 5)) %>%
+        distinct() %>%
+        pull(county_fips) %>%
+        map_dfr(~get_cbg_population_county("09", .x)) %>%
+        transmute(
+          GEOID_2024=as.character(GEOID),
+          tract_bg=substr(GEOID_2024, 6, 12),
+          cbg_population=cbg_populationE,
+          cbg_population_moe=cbg_populationM
+        ) %>%
+        mutate(
+          cbg_population=if_else(
+            cbg_population >= 0,
+            cbg_population,
+            NA_real_
+          )
+        )
+
+      cbg_population <- bind_rows(
+        cbg_population,
+        missing_ct_population %>%
+          left_join(ct_population_lookup, by="tract_bg") %>%
+          add_count(CENSUS_BLOCK_GROUP_ID, name="n_matches") %>%
+          filter(n_matches == 1) %>%
+          transmute(
+            CENSUS_BLOCK_GROUP_ID,
+            cbg_population,
+            cbg_population_moe
+          )
+      ) %>%
+        distinct(CENSUS_BLOCK_GROUP_ID, .keep_all=TRUE)
+    }
+
+    write_csv(cbg_population, cbg_population_path)
+
+    cbg_population
+  })
+}
+
 
 # GIS data ---------------------------------------------------------------
 # Mangroves
