@@ -1,5 +1,5 @@
 # Setup -------------------------------------------------------------------
-rm(list=ls()) # Clears workspace
+#rm(list=ls()) # Clears workspace
 
 # # Install/call libraries
 # install.packages("renv") # Run if you have cloned repository and don't already have renv installed
@@ -29,11 +29,6 @@ options(osrm.profile="driving")
 
 # Load data --------------------------------------------------------------
 source("Data_collation.R")
-dgs<-read_parquet("Data/tdata-combined/Airportvisittrends2024_allterminals.parquet")
-dgs<-dgs |> 
-  mutate(datetime_et=as.POSIXct(TIMESTAMP_EPOCH_MS/1000,origin="1970-01-01",tz="UTC") |> 
-        lubridate::with_tz("America/New_York"),
-        airport_service_date=as.Date(datetime_et - lubridate::hours(3))) # Using 3am as the split between airport "days" to avoid single airport trips being split into 2 trips
 
 mia_enplanements_monthly<-tibble( # https://www.miami-airport.com/airport_stats.asp
   year=2024,
