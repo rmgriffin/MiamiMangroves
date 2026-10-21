@@ -254,13 +254,8 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
 } else {
 
   pairs<-tidyr::crossing(
-    FEATUREID=dfst |>
-      st_drop_geometry() |>
-      mutate(FEATUREID=as.character(FEATUREID)) |>
-      filter(!is.na(FEATUREID)) |>
-      distinct(FEATUREID) |>
-      pull(FEATUREID),
-    CENSUS_BLOCK_GROUP_ID=dfst |>
+  FEATUREID=as.character(df$id),
+  CENSUS_BLOCK_GROUP_ID=dfst |>
       st_drop_geometry() |>
       mutate(CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)) |>
       filter(
@@ -280,25 +275,18 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
 
   dfst<-st_as_sf(dfst, sf_column_name="geom")
 
-  feature_ids<-unique(as.character(dfst$FEATUREID)) # FEATUREID geometry extraction
-  feature_ids<-feature_ids[!is.na(feature_ids)]
-
-  feature_idx<-match(feature_ids, as.character(dfst$FEATUREID))
-
-  feature_geoms<-dfst[feature_idx, c("FEATUREID", "geom")] %>%
-    mutate(FEATUREID=as.character(FEATUREID))
-
-  feature_pts<-feature_geoms %>%
-    st_make_valid() %>%
-    st_transform(4326) %>%
-    st_point_on_surface() %>%
-    mutate(
-      feature_lon=st_coordinates(.)[,1],
-      feature_lat=st_coordinates(.)[,2]
-    ) %>%
-    st_drop_geometry()
-
-  rm(feature_ids, feature_idx, feature_geoms)
+  feature_pts<-df %>%
+  mutate(FEATUREID=as.character(id)) %>%
+  dplyr::select(FEATUREID) %>%
+  st_make_valid() %>%
+  st_transform(26917) %>%
+  st_point_on_surface() %>%
+  st_transform(4326) %>%
+  mutate(
+    feature_lon=st_coordinates(.)[,1],
+    feature_lat=st_coordinates(.)[,2]
+  ) %>%
+  st_drop_geometry()
 
   state_fips<-pairs %>%
     mutate(state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2)) %>%
