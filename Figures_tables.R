@@ -864,6 +864,7 @@ dfst |>
   ) +
   theme_minimal()
 
+print(income_fallback_summary)
 
 # Travel stats viewer -----------------------------------------------------------
 cdf_df<-dfst |>
