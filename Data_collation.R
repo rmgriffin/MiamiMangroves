@@ -429,132 +429,279 @@ if(file.exists(travel_distance_path)) { # Checking to see if travel distance and
   stop("Missing Census API key. Set Sys.setenv(CENSUS_API_KEY=...) before ACS calls.")
   }
 
-  cbg_income_path<-"Data/intermediate/cbg_income_acs5_2024.csv"
+  cbg_income_path <- "Data/intermediate/cbg_income_acs5_2024.csv"
   dir.create(dirname(cbg_income_path), recursive=TRUE, showWarnings=FALSE)
 
-  if(file.exists(cbg_income_path)) { # Adding CBG household income to CBG-FeatureID pairs
-    
-    cbg_income<-read_csv(
+  if(file.exists(cbg_income_path)) {
+
+    cbg_income <- readr::read_csv(
       cbg_income_path,
-      col_types=cols(
-        CENSUS_BLOCK_GROUP_ID=col_character(),
-        med_hh_income=col_double(),
-        med_hh_income_moe=col_double()
-      )
+      col_types=readr::cols(
+        CENSUS_BLOCK_GROUP_ID=readr::col_character(),
+        med_hh_income=readr::col_double(),
+        med_hh_income_moe=readr::col_double(),
+        income_source=readr::col_character()
+      ),
+      show_col_types=FALSE
     )
-    
+
   } else {
-    
-    cbg_income_ids<-cbg_pts %>%
-      transmute(
-        CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
-        state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2),
-        county_fips=substr(CENSUS_BLOCK_GROUP_ID, 3, 5),
-        tract_bg=substr(CENSUS_BLOCK_GROUP_ID, 6, 12)
-      ) %>%
-      distinct()
-    
-    get_cbg_income_county<-function(state_fips, county_fips) {
-      tryCatch(
-        tidycensus::get_acs(
-          geography="block group",
-          variables=c(med_hh_income="B19013_001"),
-          state=state_fips,
-          county=county_fips,
-          year=2024,
-          survey="acs5",
-          geometry=FALSE,
-          output="wide"
-        ),
-        error=function(e) {
-          message("ACS income failed for state ", state_fips, ", county ", county_fips, ": ", conditionMessage(e))
-          tibble(
-            GEOID=character(),
-            NAME=character(),
-            med_hh_incomeE=double(),
-            med_hh_incomeM=double()
-          )
-        }
-      )
-    }
-    
-    cbg_income_raw<-cbg_income_ids %>%
-      distinct(state_fips, county_fips) %>%
-      pmap_dfr(~get_cbg_income_county(..1, ..2))
-    
-    cbg_income<-cbg_income_raw %>%
-      transmute(
-        CENSUS_BLOCK_GROUP_ID=as.character(GEOID),
-        med_hh_income=med_hh_incomeE,
-        med_hh_income_moe=med_hh_incomeM
-      ) %>%
-      mutate(
-        med_hh_income=if_else(med_hh_income > 0, med_hh_income, NA_real_)
-      ) %>%
-      semi_join(
-        cbg_income_ids %>% select(CENSUS_BLOCK_GROUP_ID),
-        by="CENSUS_BLOCK_GROUP_ID"
-      )
-    
-    missing_ct_income<-cbg_income_ids %>%
-      select(CENSUS_BLOCK_GROUP_ID, tract_bg) %>%
-      anti_join(cbg_income, by="CENSUS_BLOCK_GROUP_ID") %>%
-      filter(substr(CENSUS_BLOCK_GROUP_ID, 1, 2) == "09")
-    
-    if(nrow(missing_ct_income) > 0) {
-      
-      ct_counties_2024<-counties(
-        state="09",
-        year=2024,
-        cb=TRUE,
-        class="sf"
-      ) %>%
-        st_drop_geometry() %>%
-        transmute(county_fips=substr(GEOID, 3, 5)) %>%
-        distinct()
-      
-      ct_income_raw<-ct_counties_2024 %>%
-        pull(county_fips) %>%
-        map_dfr(~get_cbg_income_county("09", .x))
-      
-      ct_income_lookup<-ct_income_raw %>%
+
+    cbg_income <- local({
+
+      cbg_income_ids <- cbg_pts %>%
         transmute(
-          GEOID_2024=as.character(GEOID),
-          tract_bg=substr(GEOID_2024, 6, 12),
-          med_hh_income=med_hh_incomeE,
-          med_hh_income_moe=med_hh_incomeM
+          CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
+          state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2),
+          county_fips=substr(CENSUS_BLOCK_GROUP_ID, 3, 5),
+          tract_bg=substr(CENSUS_BLOCK_GROUP_ID, 6, 12)
         ) %>%
-        mutate(
-          med_hh_income=if_else(med_hh_income > 0, med_hh_income, NA_real_)
+        distinct()
+
+      get_cbg_income_county <- function(state_fips, county_fips) {
+        tryCatch(
+          tidycensus::get_acs(
+            geography="block group",
+            variables=c(med_hh_income="B19013_001"),
+            state=state_fips,
+            county=county_fips,
+            year=2024,
+            survey="acs5",
+            geometry=FALSE,
+            output="wide"
+          ),
+          error=function(e) {
+            if(state_fips != "09") {
+              stop(
+                "ACS block-group income request failed for state ",
+                state_fips, ", county ", county_fips, ": ",
+                conditionMessage(e),
+                call.=FALSE
+              )
+            }
+            message("Connecticut ACS county request failed: ",
+                    conditionMessage(e))
+            tibble(
+              GEOID=character(),
+              NAME=character(),
+              med_hh_incomeE=double(),
+              med_hh_incomeM=double()
+            )
+          }
         )
-      
-      ct_income_recovered<-missing_ct_income %>%
-        left_join(ct_income_lookup, by="tract_bg") %>%
-        add_count(CENSUS_BLOCK_GROUP_ID, name="n_matches") %>%
-        filter(n_matches == 1) %>%
+      }
+
+      # Retrieve block-group income estimates
+      cbg_income_raw <- cbg_income_ids %>%
+        distinct(state_fips, county_fips) %>%
+        purrr::pmap_dfr(~get_cbg_income_county(..1, ..2))
+
+      income <- cbg_income_raw %>%
         transmute(
+          CENSUS_BLOCK_GROUP_ID=as.character(GEOID),
+          source_geoid=as.character(GEOID),
+          med_hh_income=as.numeric(med_hh_incomeE),
+          med_hh_income_moe=as.numeric(med_hh_incomeM)
+        ) %>%
+        distinct(CENSUS_BLOCK_GROUP_ID, .keep_all=TRUE)
+
+      # Recover Connecticut origins with older county identifiers
+      missing_ct_income <- cbg_income_ids %>%
+        anti_join(income, by="CENSUS_BLOCK_GROUP_ID") %>%
+        filter(state_fips == "09")
+
+      if(nrow(missing_ct_income) > 0) {
+
+        ct_income_lookup <- tigris::counties(
+          state="09", year=2024, cb=TRUE, class="sf"
+        ) %>%
+          sf::st_drop_geometry() %>%
+          transmute(county_fips=substr(GEOID, 3, 5)) %>%
+          distinct() %>%
+          pull(county_fips) %>%
+          purrr::map_dfr(~get_cbg_income_county("09", .x)) %>%
+          transmute(
+            source_geoid=as.character(GEOID),
+            tract_bg=substr(source_geoid, 6, 12),
+            med_hh_income=as.numeric(med_hh_incomeE),
+            med_hh_income_moe=as.numeric(med_hh_incomeM)
+          ) %>%
+          add_count(tract_bg, name="n_matches") %>%
+          filter(n_matches == 1) %>%
+          dplyr::select(-n_matches)
+
+        income <- bind_rows(
+          income,
+          missing_ct_income %>%
+            inner_join(ct_income_lookup, by="tract_bg") %>%
+            dplyr::select(
+              CENSUS_BLOCK_GROUP_ID,
+              source_geoid,
+              med_hh_income,
+              med_hh_income_moe
+            )
+        ) %>%
+          distinct(CENSUS_BLOCK_GROUP_ID, .keep_all=TRUE)
+      }
+
+      income <- cbg_income_ids %>%
+        dplyr::select(CENSUS_BLOCK_GROUP_ID, state_fips) %>%
+        left_join(income, by="CENSUS_BLOCK_GROUP_ID") %>%
+        mutate(
+          source_geoid=if_else(
+            is.na(source_geoid) & state_fips != "09",
+            CENSUS_BLOCK_GROUP_ID,
+            source_geoid
+          ),
+          med_hh_income=if_else(
+            is.finite(med_hh_income) & med_hh_income > 0,
+            med_hh_income,
+            NA_real_
+          ),
+          income_source=if_else(
+            !is.na(med_hh_income),
+            "block_group",
+            NA_character_
+          )
+        ) %>%
+        dplyr::select(-state_fips)
+
+      # Identify states requiring geographic income fallback
+      missing_states <- income %>%
+        filter(is.na(med_hh_income), !is.na(source_geoid)) %>%
+        transmute(state_fips=substr(source_geoid, 1, 2)) %>%
+        distinct() %>%
+        pull(state_fips)
+
+      if(length(missing_states) > 0) {
+
+        # Retrieve tract-level median household income
+        tract_income <- purrr::map_dfr(missing_states, function(s) {
+          tidycensus::get_acs(
+            geography="tract",
+            variables=c(med_hh_income="B19013_001"),
+            state=s,
+            year=2024,
+            survey="acs5",
+            geometry=FALSE,
+            output="wide"
+          ) %>%
+            transmute(
+              tract_geoid=as.character(GEOID),
+              tract_income=if_else(
+                is.finite(med_hh_incomeE) & med_hh_incomeE > 0,
+                as.numeric(med_hh_incomeE),
+                NA_real_
+              ),
+              tract_moe=as.numeric(med_hh_incomeM)
+            )
+        })
+
+        # Retrieve county-level median household income
+        county_income <- purrr::map_dfr(missing_states, function(s) {
+          tidycensus::get_acs(
+            geography="county",
+            variables=c(med_hh_income="B19013_001"),
+            state=s,
+            year=2024,
+            survey="acs5",
+            geometry=FALSE,
+            output="wide"
+          ) %>%
+            transmute(
+              county_geoid=as.character(GEOID),
+              county_income=if_else(
+                is.finite(med_hh_incomeE) & med_hh_incomeE > 0,
+                as.numeric(med_hh_incomeE),
+                NA_real_
+              ),
+              county_moe=as.numeric(med_hh_incomeM)
+            )
+        })
+
+        # Fill missing income using tract and county estimates
+        income <- income %>%
+          mutate(
+            tract_geoid=substr(source_geoid, 1, 11),
+            county_geoid=substr(source_geoid, 1, 5)
+          ) %>%
+          left_join(tract_income, by="tract_geoid") %>%
+          left_join(county_income, by="county_geoid") %>%
+          mutate(
+            income_source=case_when(
+              !is.na(med_hh_income) ~ "block_group",
+              !is.na(tract_income) ~ "tract",
+              !is.na(county_income) ~ "county",
+              TRUE ~ "unavailable"
+            ),
+            med_hh_income_moe=case_when(
+              !is.na(med_hh_income) ~ med_hh_income_moe,
+              !is.na(tract_income) ~ tract_moe,
+              !is.na(county_income) ~ county_moe,
+              TRUE ~ NA_real_
+            ),
+            med_hh_income=coalesce(
+              med_hh_income,
+              tract_income,
+              county_income
+            )
+          ) %>%
+          dplyr::select(
+            CENSUS_BLOCK_GROUP_ID,
+            med_hh_income,
+            med_hh_income_moe,
+            income_source
+          )
+
+      } else {
+
+        income <- income %>%
+          dplyr::select(
+            CENSUS_BLOCK_GROUP_ID,
+            med_hh_income,
+            med_hh_income_moe,
+            income_source
+          ) %>%
+          mutate(
+            income_source=replace_na(income_source, "unavailable")
+          )
+      }
+
+      if(anyDuplicated(income$CENSUS_BLOCK_GROUP_ID)) {
+        stop("Duplicate CBG identifiers in the household income table.")
+      }
+
+      readr::write_csv(income, cbg_income_path)
+      income
+    })
+  }
+
+  # Summarize income geographic sources
+  cbg_income %>%
+    count(income_source, name="n_cbgs") %>%
+    print()
+
+  # Attach income estimates to origin coordinates
+  cbg_pts <- cbg_pts %>%
+    left_join(
+      cbg_income %>%
+        dplyr::select(
           CENSUS_BLOCK_GROUP_ID,
           med_hh_income,
           med_hh_income_moe
-        )
-      
-      cbg_income<-bind_rows(cbg_income, ct_income_recovered) %>%
-        distinct(CENSUS_BLOCK_GROUP_ID, .keep_all=TRUE)
-    }
-    
-    write_csv(cbg_income, cbg_income_path)
-  }
+        ),
+      by="CENSUS_BLOCK_GROUP_ID"
+    )
 
-  cbg_pts<-cbg_pts %>%
-    left_join(cbg_income, by="CENSUS_BLOCK_GROUP_ID")
-
-  cbg_pts %>%
-    summarise(
-      n_cbgs=n(),
-      n_missing_income=sum(is.na(med_hh_income)),
-      share_missing_income=mean(is.na(med_hh_income))
-    ) %>%
-    print()  
+  income_fallback_summary <- cbg_income |> 
+  count(income_source, name = "n_cbgs") |> 
+  mutate(
+    pct_cbgs = 100 * n_cbgs / sum(n_cbgs)
+  ) |> 
+  arrange(match(
+    income_source,
+    c("block_group", "tract", "county", "unavailable")
+  ))
 
   pair_pts<-pairs %>% # Pair table with origin and destination coordinates
     left_join(feature_pts, by="FEATUREID") %>%
@@ -734,7 +881,7 @@ dfst<-dfst %>%
     by=c("FEATUREID", "CENSUS_BLOCK_GROUP_ID")
   )
 
-rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census)
+rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census,ct_match_diag)
 
 dfst$Name<-str_to_title(dfst$Name)
 
