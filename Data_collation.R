@@ -100,12 +100,17 @@ dfs<-list.files(
 #   )
 
 dfs26<-read_parquet("Data/tdata-combined/202604_202606data_1_68_120_130_357_358.parquet")
-dfs<-rbind(dfs,dfs26)
 
-df<-st_transform(st_read("Data/GIS_data/County_State_National_Municipal_v3.gpkg"), crs = 4326) # Merging to spatial data
-df$id<-seq(1,nrow(df),1)
+dfs<-rbind(dfs,dfs26) %>%
+  filter(!FEATUREID %in% c(357,358))
 
-dfst<-left_join(dfs,df, join_by(FEATUREID == id))
+df<-st_transform(st_read("Data/GIS_data/County_State_National_Municipal_v3.gpkg"), crs=4326)
+df$id<-seq_len(nrow(df))
+
+df<-df %>%
+  filter(!id %in% c(357,358))
+
+dfst<-left_join(dfs,df,join_by(FEATUREID == id))
 
 # Airport visits and 24 hour window after movement
 dds_path<-"Data/intermediate/airport_24h_post_terminal_observations.parquet"
