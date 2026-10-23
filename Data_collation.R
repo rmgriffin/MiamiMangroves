@@ -10,7 +10,7 @@ rm(list=ls()) # Clears workspace
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm","tidycensus","terra","exactextractr")
+pkgs<-c("tidyverse","googledrive","arrow","furrr","sf","tigris","osrm","tidycensus","terra","exactextractr","osmdata")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -1111,7 +1111,6 @@ df$impervious_pct <- exact_extract(
 rm(impervious)
 
 # Island
-
 df<-df |> # Island (boat access only) indicator variable
   mutate(
     island = 0
@@ -1145,3 +1144,187 @@ df<-df |> # Island (boat access only) indicator variable
       island
     )
   )
+
+
+# Sports facilities - Florida Outdoor Recreation Inventory
+fori <- local({
+
+  base <- paste0(
+    "https://cadev.dep.state.fl.us/arcgis/rest/services/",
+    "OpenData/PARKS_FORI/MapServer/0/query"
+  )
+
+  bb <- st_bbox(st_transform(df, 4326))
+  bb[c("xmin", "ymin")] <- bb[c("xmin", "ymin")] - 0.01
+  bb[c("xmax", "ymax")] <- bb[c("xmax", "ymax")] + 0.01
+
+  query <- paste0(
+    "?where=1%3D1",
+    "&geometry=", paste(unname(bb), collapse=","),
+    "&geometryType=esriGeometryEnvelope",
+    "&inSR=4326",
+    "&spatialRel=esriSpatialRelIntersects"
+  )
+
+  n <- jsonlite::fromJSON(
+    paste0(base, query, "&returnCountOnly=true&f=json")
+  )$count
+
+  if (is.null(n) || n == 0)
+    stop("No FORI records returned.")
+
+  purrr::map_dfr(seq(0, n - 1, by=1000), function(offset) {
+    st_read(
+      paste0(
+        base, query,
+        "&outFields=*",
+        "&returnGeometry=true",
+        "&outSR=4326",
+        "&orderByFields=OBJECTID",
+        "&resultOffset=", offset,
+        "&resultRecordCount=1000",
+        "&f=geojson"
+      ),
+      quiet=TRUE
+    )
+  }) |>
+    st_transform(26917)
+})
+
+# Identify sports facilities from inventory counts
+fori$fori_sports <- local({
+
+  sports <- fori |>
+    st_drop_geometry() |>
+    dplyr::select(
+      OUTDOOR_TENNIS_COURTS,
+      OUTDOOR_BASKETBALL_COURTS,
+      BASEBALL_SOFTBALL_FIELDS,
+      FOOTBALL_SOCCER_FIELDS,
+      VOLLEYBALL_COURTS,
+      MULTIUSE_COURTS,
+      MULTIPLE_USE_FIELDS,
+      RACQUETBALL_COURTS,
+      SHUFFLEBOARD_COURTS,
+      SKATEPARKS,
+      OUTDOOR_SWIMMING_POOLS,
+      GOLF_HOLES_TOTAL,
+      GOLF_EXECUTIVE,
+      GOLF_18_HOLE,
+      GOLF_9_HOLE,
+      PLAYGROUNDS,
+      RECREATIONAL_CENTERS
+    )
+
+  case_when(
+    rowSums(sports > 0, na.rm=TRUE) > 0 ~ 1L,
+    rowSums(is.na(sports)) > 0 ~ NA_integer_,
+    TRUE ~ 0L
+  )
+})
+
+# Match recreation inventory sites to park boundaries
+fori_matches <- st_join(
+  fori,
+  st_transform(
+    df |> dplyr::select(id, Name),
+    26917
+  ),
+  join=st_intersects,
+  left=FALSE
+) |>
+  st_drop_geometry()
+
+# Sports facilities
+df <- df |>
+  left_join(
+    st_join(
+      fori |>
+        mutate(
+          fori_sports=as.integer(
+            rowSums(
+              dplyr::pick(
+                OUTDOOR_TENNIS_COURTS,
+                OUTDOOR_BASKETBALL_COURTS,
+                BASEBALL_SOFTBALL_FIELDS,
+                FOOTBALL_SOCCER_FIELDS,
+                VOLLEYBALL_COURTS,
+                MULTIUSE_COURTS,
+                MULTIPLE_USE_FIELDS,
+                RACQUETBALL_COURTS,
+                SHUFFLEBOARD_COURTS,
+                SKATEPARKS,
+                OUTDOOR_SWIMMING_POOLS,
+                GOLF_HOLES_TOTAL,
+                GOLF_EXECUTIVE,
+                GOLF_18_HOLE,
+                GOLF_9_HOLE,
+                PLAYGROUNDS,
+                RECREATIONAL_CENTERS
+              ) > 0,
+              na.rm=TRUE
+            ) > 0
+          )
+        ) |>
+        dplyr::select(fori_sports),
+      st_transform(df |> dplyr::select(id), 26917),
+      join=st_intersects,
+      left=FALSE
+    ) |>
+      st_drop_geometry() |>
+      group_by(id) |>
+      summarise(
+        sports_facilities=as.integer(any(fori_sports == 1L)),
+        .groups="drop"
+      ),
+    by="id"
+  ) |>
+  mutate(
+    sports_facilities=coalesce(sports_facilities, 0L)
+  )
+
+# Additional sports facilities verified from imagery
+df <- df |>
+  mutate(
+    sports_facilities=if_else(
+      Name %in% c(
+        "St. Agnes Athletic Field",
+        "Town Center and Skate Park",
+        "Peace Park Tennis Court",
+        "Founders Park SplashPad",
+        "Indian Creek Golf Club",
+        "Bay Harbor Island Tennis Courts",
+        "Jose Marti Park Baseball Field",
+        "La Gorce Golf Course",
+        "Little Haiti Soccer Park",
+        "Veterans Park & Tennis Center",
+        "Victory Homes Recreation Area",
+        "IVES ESTATES TENNIS CENTER",
+        "Key Biscayne K-8 Center Field",
+        "Mast Academy Field",
+        "Waterway Park",
+        "Margaret Pace Park",
+        "Saga Bay Park",
+        "Biscayne Elementary Park",
+        "Bal Harbour Park",
+        "DEBBIE CURTIN PARK",
+        "Cutler Ridge Park and Pool",
+        "Franjo Park",
+        "Fulford Park",
+        "Harry Cohen Complex / Challenger Park",
+        "South Miami Dog Park",
+        "SABAL PALM PARK",
+        "Uleta Park Community Center",
+        "Flagler Grove Park",
+        "Bel Aire Park",
+        "HOMESTEAD AIR RESERVE PARK",
+        "KEVIN BROILS PARK",
+        "Mayor Roscoe Warren Municipal Park",
+        "PALMLAND PARK"
+      ),
+      1L,
+      sports_facilities
+    )
+  )
+
+rm(fori,fori_matches)
