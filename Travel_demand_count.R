@@ -43,7 +43,7 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Eligible destinations -------------------------------------------------
 needed_site <- c(
   "id", "Name", "island", "mangrove_presence", "mangrove_m2",
-  "beach_area_ha", "tree_canopy_pct", "impervious_pct"
+  "beach_area_ha", "tree_canopy_pct", "impervious_pct", "sports_facilities"
 )
 if (!exists("df") || !all(needed_site %in% names(df))) {
   stop("Missing site attributes in df: ",
@@ -62,6 +62,7 @@ site_attributes <- df %>%
     beach_area_ha = as.numeric(beach_area_ha),
     tree_canopy_pct = as.numeric(tree_canopy_pct),
     impervious_pct = as.numeric(impervious_pct),
+    sports_facilities = as.integer(sports_facilities),
     log_park_area = as.numeric(log(1+park_area_m2))
   )
 if (anyNA(site_attributes$FEATUREID) || anyDuplicated(site_attributes$FEATUREID)) {
@@ -83,9 +84,10 @@ site_attributes <- site_attributes %>%
     log_mangrove_ha = log1p(mangrove_ha),
     log_beach_ha = log1p(beach_area_ha)
   )
-site_controls <- c("log_beach_ha", "tree_canopy_pct", "impervious_pct", "log_park_area")
+site_controls <- c("log_beach_ha", "tree_canopy_pct", "impervious_pct", "log_park_area", "sports_facilities")
 site_terms <- c("mangrove_presence", "log_mangrove_ha", site_controls)
 if (!all(site_attributes$mangrove_presence %in% c(0L, 1L)) ||
+    !all(site_attributes$sports_facilities %in% c(0L, 1L)) ||
     any(!is.finite(as.matrix(site_attributes[site_terms]))) ||
     any(site_attributes$mangrove_ha < 0) ||
     any(site_attributes$beach_area_ha < 0) ||
@@ -446,13 +448,15 @@ rum_results <- local({
         "Travel cost: +$10" = 10,
         "Beach: 0 to 1 ha" = log(2),
         "Tree canopy: +1 percentage point" = 1,
-        "Impervious: +1 percentage point" = 1
+        "Impervious: +1 percentage point" = 1,
+        "Sports facilities: absent to present" = 1
       )
       term_map <- c(
         "Travel cost: +$10" = "travel_cost_dollars",
         "Beach: 0 to 1 ha" = "log_beach_ha",
         "Tree canopy: +1 percentage point" = "tree_canopy_pct",
-        "Impervious: +1 percentage point" = "impervious_pct"
+        "Impervious: +1 percentage point" = "impervious_pct",
+        "Sports facilities: absent to present" = "sports_facilities"
       )
       increments <- c(increments, "Park area: +1 log-area unit" = 1)
       term_map <- c(term_map, "Park area: +1 log-area unit" = "log_park_area")
