@@ -886,7 +886,7 @@ dfst<-dfst %>%
     by=c("FEATUREID", "CENSUS_BLOCK_GROUP_ID")
   )
 
-rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census,ct_match_diag)
+rm(dfs,dfs26,dds_path,travel_distance_path,pad_cbg,api_key_census)
 
 dfst$Name<-str_to_title(dfst$Name)
 
@@ -1025,35 +1025,28 @@ cbg_population <- if(file.exists(cbg_population_path)) {
 
 # GIS data ---------------------------------------------------------------
 # Mangroves
-gmw<-rast("Data/GIS_data/Mangroves/Miami_area_gmw_v3_2020.tif") # 2020 Global Mangrove Watch data for Miami 
-df$mangrove_m2<-exact_extract(gmw,df,"sum",coverage_area=TRUE) # Area in m2 of mangrove within each park boundary
+
+#gmw<-rast("Data/GIS_data/Mangroves/Miami_area_gmw_v3_2020.tif") # 2020 Global Mangrove Watch data for Miami 
+#df$mangrove_m2<-exact_extract(gmw,df,"sum",coverage_area=TRUE) # Area in m2 of mangrove within each park boundary
+
+mangroves<-st_read("Data/GIS_data/Mangroves/Urbn_Mang_spatjoin_0923_EPSG26917.gpkg")
+df$mangrove_m2<-df |>
+  st_transform(32617) |>
+  mutate(.id=row_number()) |>
+  select(.id) |>
+  st_intersection(st_transform(st_geometry(mangroves), 32617)) |>
+  mutate(area_m2=as.numeric(st_area(geom))) |>
+  st_drop_geometry() |>
+  group_by(.id) |>
+  summarise(area_m2=sum(area_m2), .groups="drop") |>
+  right_join(tibble(.id=seq_len(nrow(df))), by=".id") |>
+  arrange(.id) |>
+  pull(area_m2) |>
+  replace_na(0)
+
 df<-df |> # Mangrove indicator variable
-  mutate(
-    mangrove_presence = as.integer(coalesce(mangrove_m2, 0) > 0)
-  ) |>
-  mutate(
-    mangrove_presence = if_else(
-      Name %in% c(
-        "Kenneth M.Myers Bayside Park",
-        "Icon Bay Park",
-        "Margaret Pace Park",
-        "Miami Rowing Center- Virginia Key Park",
-        "Morningside Island",
-        "Morningside Picnic Island #3",
-        "Morningside Park",
-        "Peacock / K. Myers Park",
-        "Pace Park picnic Islands #1",
-        "Willis Island",
-        "Baywood Park",
-        "Legion Memorial Park",
-        "Little River Pocket Park",
-        "Manatee Bend Park"
-      ),
-      1L,
-      mangrove_presence
-    )
-  )
-rm(gmw)
+  mutate(mangrove_presence = as.integer(coalesce(mangrove_m2, 0) > 0))
+rm(mangroves)
 
 # Park area
 df$park_area_m2 <- as.numeric(st_area(st_transform(df, 26917)))
@@ -1328,3 +1321,33 @@ df <- df |>
   )
 
 rm(fori,fori_matches)
+
+
+# Waterfront -------------------------------------------------------------
+coast<-local({
+  shp<-"Data/GIS_data/CUSP shoreline/N25W085.shp"
+  coast_crs<-st_layers(shp)$crs[[1]]
+
+  st_read(
+    shp,
+    wkt_filter=st_as_text(
+      st_transform(
+        st_buffer(st_as_sfc(st_bbox(st_transform(df,26917))),10),
+        coast_crs
+      )
+    ),
+    quiet=TRUE
+  ) |>
+    st_transform(26917)
+})
+
+df$marine_waterfront<-as.integer(
+  lengths(st_is_within_distance(
+    st_boundary(st_transform(df,26917)),
+    coast,
+    dist=5
+  )) > 0
+)
+
+rm(coast)
+
