@@ -43,7 +43,8 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Eligible destinations -------------------------------------------------
 needed_site <- c(
   "id", "Name", "island", "mangrove_presence", "mangrove_m2",
-  "beach_area_ha", "tree_canopy_pct", "impervious_pct", "sports_facilities"
+  "beach_area_ha", "tree_canopy_pct", "impervious_pct",
+  "sports_facilities", "marine_waterfront"
 )
 if (!exists("df") || !all(needed_site %in% names(df))) {
   stop("Missing site attributes in df: ",
@@ -59,12 +60,17 @@ site_attributes <- df %>%
     island = as.integer(island),
     mangrove_presence = as.integer(mangrove_presence),
     mangrove_ha = as.numeric(mangrove_m2) / 10000,
+    log_mangrove_ha = log1p(mangrove_ha),
     beach_area_ha = as.numeric(beach_area_ha),
+    log_beach_ha = log1p(beach_area_ha),
     tree_canopy_pct = as.numeric(tree_canopy_pct),
     impervious_pct = as.numeric(impervious_pct),
     sports_facilities = as.integer(sports_facilities),
-    log_park_area = as.numeric(log(1+park_area_m2))
-  )
+    marine_waterfront = as.integer(marine_waterfront),
+    log_park_area = log1p(park_area_m2)
+  ) |> 
+  filter(island == 0L)
+
 if (anyNA(site_attributes$FEATUREID) || anyDuplicated(site_attributes$FEATUREID)) {
   stop("Every site must have a unique, nonmissing id.")
 }
@@ -72,29 +78,66 @@ if (anyNA(site_attributes$island) ||
     !all(site_attributes$island %in% c(0L, 1L))) {
   stop("island must be coded 0 or 1 for every site.")
 }
-
 site_checks <- tibble(
   all_sites = nrow(site_attributes),
   island_sites_excluded = sum(site_attributes$island == 1L),
   mainland_sites = sum(site_attributes$island == 0L)
 )
-site_attributes <- site_attributes %>%
-  filter(island == 0L) %>%
-  mutate(
-    log_mangrove_ha = log1p(mangrove_ha),
-    log_beach_ha = log1p(beach_area_ha)
-  )
-site_controls <- c("log_beach_ha", "tree_canopy_pct", "impervious_pct", "log_park_area", "sports_facilities")
+
+site_controls <- c("log_beach_ha", "tree_canopy_pct", "impervious_pct", "log_park_area", "sports_facilities", "marine_waterfront")
 site_terms <- c("mangrove_presence", "log_mangrove_ha", site_controls)
 if (!all(site_attributes$mangrove_presence %in% c(0L, 1L)) ||
     !all(site_attributes$sports_facilities %in% c(0L, 1L)) ||
+    !all(site_attributes$marine_waterfront %in% c(0L, 1L)) ||
     any(!is.finite(as.matrix(site_attributes[site_terms]))) ||
     any(site_attributes$mangrove_ha < 0) ||
     any(site_attributes$beach_area_ha < 0) ||
     any(site_attributes$tree_canopy_pct < 0 | site_attributes$tree_canopy_pct > 100) ||
     any(site_attributes$impervious_pct < 0 | site_attributes$impervious_pct > 100)) {
-  stop("Non-island site covariates are missing or invalid; inspect df.")
+  stop("Site covariates are missing or invalid; inspect df.")
 }
+
+# Observed visitor-days -------------------------------------------------
+if (!file.exists(counts_path)) {
+  if (!exists("dfst")) stop("dfst is required to build visit counts.")
+  needed_visits <- c("DEVICEID", "DAY_IN_FEATURE", "FEATUREID",
+                     "CENSUS_BLOCK_GROUP_ID", "timespan_min", "calibrated_visits")
+  if (!all(needed_visits %in% names(dfst))) {
+    stop("Missing dfst columns: ",
+         paste(setdiff(needed_visits, names(dfst)), collapse=", "))
+  }
+  cbg_site_visits <- dfst %>%
+    sf::st_drop_geometry() %>%
+    dplyr::select(dplyr::all_of(needed_visits)) %>%
+    mutate(
+      DAY_IN_FEATURE=as.Date(DAY_IN_FEATURE),
+      FEATUREID=as.character(FEATUREID),
+      CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
+    ) %>%
+    filter(
+      !is.na(DAY_IN_FEATURE),
+      as.integer(format(DAY_IN_FEATURE, "%Y")) == analysis_year,
+      !is.na(DEVICEID), !is.na(FEATUREID), !is.na(CENSUS_BLOCK_GROUP_ID),
+      is.finite(timespan_min), is.finite(calibrated_visits), calibrated_visits > 0
+    ) %>%
+    semi_join(site_attributes %>% dplyr::select(FEATUREID), by="FEATUREID") %>%
+    group_by(DEVICEID, DAY_IN_FEATURE) %>%
+    slice_max(timespan_min, n=1, with_ties=FALSE) %>%
+    ungroup() %>%
+    group_by(CENSUS_BLOCK_GROUP_ID, FEATUREID) %>%
+    summarise(
+      device_visitor_days=n(),
+      calibrated_visitor_days=sum(calibrated_visits),
+      .groups="drop"
+    )
+  if (nrow(cbg_site_visits) == 0L) stop("No visitor-days in the analysis year.")
+  arrow::write_parquet(cbg_site_visits, counts_path, compression="zstd")
+}
+cbg_site_visits <- arrow::read_parquet(counts_path) %>%
+  mutate(
+    CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
+    FEATUREID=as.character(FEATUREID)
+  )
 
 
 # Construct origin-site model data -------------------------------------------------
@@ -123,8 +166,11 @@ cbg_site_model <- local({
 
   eligible_origins <- cbg_site_visits %>%
     distinct(CENSUS_BLOCK_GROUP_ID) %>%
-    inner_join(cbg_population, by="CENSUS_BLOCK_GROUP_ID")
-  if (nrow(eligible_origins) == 0L) stop("No eligible origins with population data.")
+    inner_join(
+      cbg_population %>%
+        filter(is.finite(cbg_population), cbg_population > 0),
+      by="CENSUS_BLOCK_GROUP_ID"
+    )
 
   dist_input <- distance_results %>%
     dplyr::select(dplyr::all_of(needed_distance))
@@ -194,7 +240,10 @@ cbg_site_model <- local({
     mutate(
       device_visitor_days=replace_na(device_visitor_days, 0L),
       calibrated_visitor_days=replace_na(calibrated_visitor_days, 0)
-    )
+    ) %>%
+    group_by(CENSUS_BLOCK_GROUP_ID) %>%
+    filter(any(device_visitor_days > 0)) %>%
+    ungroup()
 
   # Select origin choice sets for estimation.
   if (!is.null(fit_origin_sample)) {
@@ -449,14 +498,16 @@ rum_results <- local({
         "Beach: 0 to 1 ha" = log(2),
         "Tree canopy: +1 percentage point" = 1,
         "Impervious: +1 percentage point" = 1,
-        "Sports facilities: absent to present" = 1
+        "Sports facilities: absent to present" = 1,
+        "Marine waterfront: absent to present" = 1
       )
       term_map <- c(
         "Travel cost: +$10" = "travel_cost_dollars",
         "Beach: 0 to 1 ha" = "log_beach_ha",
         "Tree canopy: +1 percentage point" = "tree_canopy_pct",
         "Impervious: +1 percentage point" = "impervious_pct",
-        "Sports facilities: absent to present" = "sports_facilities"
+        "Sports facilities: absent to present" = "sports_facilities",
+        "Marine waterfront: absent to present" = "marine_waterfront"
       )
       increments <- c(increments, "Park area: +1 log-area unit" = 1)
       term_map <- c(term_map, "Park area: +1 log-area unit" = "log_park_area")
@@ -692,3 +743,5 @@ if (!is.null(rum_results$figures$site_marginals)) {
   print(rum_results$figures$site_marginals)
 }
 cat("\nResults available in rum_results$models, $tables, $figures, and $data.\n")
+
+#writeClipboard(paste(capture.output({ print(fixest::etable(rum_results$models$site_presence, rum_results$models$site_extent)); print(fixest::etable(rum_results$models$frequency_presence, rum_results$models$frequency_extent)); print(rum_results$tables) }), collapse="\r\n"))
