@@ -43,8 +43,8 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Eligible destinations -------------------------------------------------
 needed_site <- c(
   "id", "Name", "island", "mangrove_presence", "mangrove_m2",
-  "beach_area_ha", "tree_canopy_pct", "impervious_pct",
-  "sports_facilities", "marine_waterfront"
+  "beach_area_ha", "tree_canopy_pct", "impervious_pct", "sports_facilities",
+  "marine_waterfront"
 )
 if (!exists("df") || !all(needed_site %in% names(df))) {
   stop("Missing site attributes in df: ",
@@ -279,7 +279,7 @@ if (choice_set_coverage$complete_origins < choice_set_coverage$origins) {
 
 # Stage 1: conditional destination choice -------------------------------
 # Nested specifications assess coefficient sensitivity to site controls.
-fit_site_choice <- function(mangrove_term, controls = character()) {
+fit_site_choice <- function(mangrove_term, controls = character(), data = cbg_site_model) {
   rhs <- c("travel_cost_dollars", mangrove_term, controls)
 
   formula <- stats::as.formula(paste(
@@ -289,7 +289,7 @@ fit_site_choice <- function(mangrove_term, controls = character()) {
 
   fit <- fixest::fepois(
     formula,
-    data = cbg_site_model,
+    data = data,
     vcov = ~ CENSUS_BLOCK_GROUP_ID + FEATUREID,
     nthreads = n_threads,
     lean = TRUE
@@ -313,6 +313,19 @@ fit_site_choice <- function(mangrove_term, controls = character()) {
 # Full destination-choice specifications
 m_site_presence <- fit_site_choice("mangrove_presence", site_controls)
 m_site_extent <- fit_site_choice("log_mangrove_ha", site_controls)
+
+# Park-area functional form sensitivity ---------------------------------
+m_site_extent_quadratic <- fixest::fepois(
+  device_visitor_days ~ travel_cost_dollars + log_mangrove_ha +
+    log_beach_ha + tree_canopy_pct + impervious_pct +
+    log_park_area + I(log_park_area^2) +
+    sports_facilities + marine_waterfront |
+    CENSUS_BLOCK_GROUP_ID,
+  data = cbg_site_model,
+  vcov = ~ CENSUS_BLOCK_GROUP_ID + FEATUREID,
+  nthreads = n_threads,
+  lean = TRUE
+)
 
 # Nested specification comparisons
 m_site_progression <- list(
@@ -387,7 +400,7 @@ if (!all(is.finite(cbg_annual$calibrated_visitor_days)) ||
     !all(cbg_annual$cbg_population > 0)) {
   stop("CBG visitor-days, income, or Census population are invalid.")
 }
-fit_frequency <- function(iv_term, state_fe = FALSE) {
+fit_frequency <- function(iv_term, state_fe = FALSE, data = cbg_annual) {
   formula <- stats::as.formula(paste0(
     "calibrated_visitor_days ~ ", iv_term, " + log_income",
     if (state_fe) " | state_fips" else ""
@@ -395,7 +408,7 @@ fit_frequency <- function(iv_term, state_fe = FALSE) {
   fixest::fepois(
     formula,
     offset = ~ log(cbg_population),
-    data = cbg_annual,
+    data = data,
     vcov = "hetero",
     nthreads = n_threads,
     glm.iter = 100,
@@ -665,6 +678,126 @@ rum_results <- local({
   )
 })
 
+# Geographic sensitivity: Florida-origin visitors ----------------------
+florida <- local({
+  model <- cbg_site_model %>%
+    filter(substr(CENSUS_BLOCK_GROUP_ID, 1, 2) == "12")
+  if (nrow(model) == 0L) stop("No Florida-origin observations.")
+
+  site_presence <- fit_site_choice("mangrove_presence", site_controls, data = model)
+  site_extent <- fit_site_choice("log_mangrove_ha", site_controls, data = model)
+  bp_fl <- stats::coef(site_presence)
+  be_fl <- stats::coef(site_extent)
+
+  # Utilities use the Florida-estimated destination-choice coefficients.
+  model <- model %>%
+    mutate(
+      V_presence = unname(bp_fl[["travel_cost_dollars"]]) * travel_cost_dollars +
+        unname(bp_fl[["mangrove_presence"]]) * mangrove_presence,
+      V_extent = unname(be_fl[["travel_cost_dollars"]]) * travel_cost_dollars +
+        unname(be_fl[["log_mangrove_ha"]]) * log_mangrove_ha
+    )
+  for (term in site_controls) {
+    model[["V_presence"]] <- model[["V_presence"]] +
+      unname(bp_fl[[term]]) * model[[term]]
+    model[["V_extent"]] <- model[["V_extent"]] +
+      unname(be_fl[[term]]) * model[[term]]
+  }
+
+  iv_fl <- model %>%
+    group_by(CENSUS_BLOCK_GROUP_ID) %>%
+    summarise(
+      max_presence = max(V_presence),
+      IV_presence = max_presence + log(sum(exp(V_presence - max_presence))),
+      max_extent = max(V_extent),
+      IV_extent = max_extent + log(sum(exp(V_extent - max_extent))),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      monetary_iv_presence = IV_presence / -unname(bp_fl[["travel_cost_dollars"]]),
+      monetary_iv_extent = IV_extent / -unname(be_fl[["travel_cost_dollars"]])
+    ) %>%
+    dplyr::select(CENSUS_BLOCK_GROUP_ID, monetary_iv_presence, monetary_iv_extent)
+
+  annual_fl <- model %>%
+    group_by(CENSUS_BLOCK_GROUP_ID) %>%
+    summarise(
+      device_visitor_days = sum(device_visitor_days),
+      calibrated_visitor_days = sum(calibrated_visitor_days),
+      med_hh_income = first(med_hh_income),
+      .groups = "drop"
+    ) %>%
+    inner_join(cbg_population, by = "CENSUS_BLOCK_GROUP_ID") %>%
+    inner_join(iv_fl, by = "CENSUS_BLOCK_GROUP_ID") %>%
+    mutate(log_income = log(med_hh_income))
+
+  list(
+    models = list(
+      site_presence = site_presence,
+      site_extent = site_extent,
+      frequency_presence = fit_frequency("monetary_iv_presence", data = annual_fl),
+      frequency_extent = fit_frequency("monetary_iv_extent", data = annual_fl)
+    ),
+    coverage = tibble(
+      origin_cbgs = nrow(annual_fl),
+      represented_population = sum(annual_fl$cbg_population),
+      device_visitor_days = sum(annual_fl$device_visitor_days),
+      calibrated_visitor_days = sum(annual_fl$calibrated_visitor_days),
+      share_calibrated_visitor_days =
+        sum(annual_fl$calibrated_visitor_days) / sum(cbg_annual$calibrated_visitor_days)
+    )
+  )
+})
+rum_results$models$florida <- florida$models
+rum_results$models$site_extent_quadratic <- m_site_extent_quadratic
+rum_results$tables$florida_coverage <- florida$coverage
+rm(florida)
+
+rum_results$tables$coefficients <- bind_rows(
+  rum_results$tables$coefficients,
+  purrr::imap_dfr(
+    rum_results$models$florida,
+    function(fit, model) {
+      ct <- fixest::coeftable(fit)
+      tibble(
+        stage = if (startsWith(model, "site_")) "Site choice" else "Annual frequency",
+        model = paste("Florida", if (endsWith(model, "presence")) "Presence" else "Extent"),
+        term = rownames(ct),
+        estimate = as.numeric(ct[, 1]),
+        se = as.numeric(ct[, 2]),
+        p_value = as.numeric(ct[, 4])
+      )
+    }
+  )
+)
+
+rum_results$tables$site_sensitivity <- purrr::imap_dfr(
+  list(
+    "All origins: presence" = m_site_presence,
+    "Florida: presence" = rum_results$models$florida$site_presence,
+    "All origins: extent" = m_site_extent,
+    "Florida: extent" = rum_results$models$florida$site_extent,
+    "All origins: extent, quadratic park size" = m_site_extent_quadratic
+  ),
+  function(fit, specification) {
+    b <- stats::coef(fit)
+    term <- if ("mangrove_presence" %in% names(b))
+      "mangrove_presence" else "log_mangrove_ha"
+    increment <- if (term == "mangrove_presence") 1 else log(2)
+    ct <- fixest::coeftable(fit)
+    tibble(
+      specification = specification,
+      observations = as.numeric(stats::nobs(fit)),
+      mangrove_coefficient = unname(b[[term]]),
+      se = unname(ct[term, "Std. Error"]),
+      p_value = unname(ct[term, 4]),
+      odds_ratio = exp(unname(b[[term]]) * increment),
+      monetary_equivalent = unname(b[[term]]) * increment /
+        -unname(b[["travel_cost_dollars"]])
+    )
+  }
+)
+
 # Mangrove coefficient sensitivity --------------------------------------
 rum_results$tables$mangrove_progression <- purrr::imap_dfr(
   m_site_progression,
@@ -742,6 +875,30 @@ print(rum_results$figures$frequency_fit)
 if (!is.null(rum_results$figures$site_marginals)) {
   print(rum_results$figures$site_marginals)
 }
+cat("\nFLORIDA ORIGIN SAMPLE\n")
+print(rum_results$tables$florida_coverage, width = Inf)
+cat("\nGEOGRAPHIC SENSITIVITY: DESTINATION CHOICE\n")
+cat("Columns: All origins presence | Florida presence | All origins extent | Florida extent\n")
+print(fixest::etable(
+  rum_results$models$site_presence,
+  rum_results$models$florida$site_presence,
+  rum_results$models$site_extent,
+  rum_results$models$florida$site_extent, digits = 3
+))
+cat("\nGEOGRAPHIC SENSITIVITY: ANNUAL FREQUENCY\n")
+cat("Columns: All origins presence | Florida presence | All origins extent | Florida extent\n")
+print(fixest::etable(
+  rum_results$models$frequency_presence,
+  rum_results$models$florida$frequency_presence,
+  rum_results$models$frequency_extent,
+  rum_results$models$florida$frequency_extent, digits = 3
+))
+cat("\nPARK-AREA FUNCTIONAL FORM SENSITIVITY\n")
+print(fixest::etable(
+  rum_results$models$site_extent,
+  rum_results$models$site_extent_quadratic, digits = 3
+))
+print(rum_results$tables$site_sensitivity, n = Inf, width = Inf)
 cat("\nResults available in rum_results$models, $tables, $figures, and $data.\n")
 
 #writeClipboard(paste(capture.output({ print(fixest::etable(rum_results$models$site_presence, rum_results$models$site_extent)); print(fixest::etable(rum_results$models$frequency_presence, rum_results$models$frequency_extent)); print(rum_results$tables) }), collapse="\r\n"))
