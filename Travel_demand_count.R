@@ -36,7 +36,7 @@ calculate_site_marginals <- TRUE
 n_threads <- max(1L, parallel::detectCores(logical = FALSE) - 2L)
 cache_dir <- "Data/intermediate"
 counts_path <- file.path(cache_dir, paste0("cbg_site_visits_", analysis_year, ".parquet"))
-site_model_path <- file.path(cache_dir, paste0("cbg_site_model_", analysis_year, ".parquet"))
+device_sample_path <- file.path(cache_dir, paste0("dfst_model_source_", analysis_year, ".parquet"))
 dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 
 
@@ -44,7 +44,7 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 needed_site <- c(
   "id", "Name", "island", "mangrove_presence", "mangrove_m2",
   "beach_area_ha", "tree_canopy_pct", "impervious_pct", "sports_facilities",
-  "marine_waterfront"
+  "marine_waterfront", "park_area_m2"
 )
 if (!exists("df") || !all(needed_site %in% names(df))) {
   stop("Missing site attributes in df: ",
@@ -67,7 +67,8 @@ site_attributes <- df %>%
     impervious_pct = as.numeric(impervious_pct),
     sports_facilities = as.integer(sports_facilities),
     marine_waterfront = as.integer(marine_waterfront),
-    log_park_area = log1p(park_area_m2)
+    park_ha = as.numeric(park_area_m2) / 10000,
+    log_park_area = log(park_ha)
   ) |> 
   filter(island == 0L)
 
@@ -90,6 +91,7 @@ if (!all(site_attributes$mangrove_presence %in% c(0L, 1L)) ||
     !all(site_attributes$sports_facilities %in% c(0L, 1L)) ||
     !all(site_attributes$marine_waterfront %in% c(0L, 1L)) ||
     any(!is.finite(as.matrix(site_attributes[site_terms]))) ||
+    any(!is.finite(site_attributes$park_ha) | site_attributes$park_ha <= 0) ||
     any(site_attributes$mangrove_ha < 0) ||
     any(site_attributes$beach_area_ha < 0) ||
     any(site_attributes$tree_canopy_pct < 0 | site_attributes$tree_canopy_pct > 100) ||
@@ -97,47 +99,90 @@ if (!all(site_attributes$mangrove_presence %in% c(0L, 1L)) ||
   stop("Site covariates are missing or invalid; inspect df.")
 }
 
-# Observed visitor-days -------------------------------------------------
-if (!file.exists(counts_path)) {
-  if (!exists("dfst")) stop("dfst is required to build visit counts.")
-  needed_visits <- c("DEVICEID", "DAY_IN_FEATURE", "FEATUREID",
-                     "CENSUS_BLOCK_GROUP_ID", "timespan_min", "calibrated_visits")
-  if (!all(needed_visits %in% names(dfst))) {
-    stop("Missing dfst columns: ",
-         paste(setdiff(needed_visits, names(dfst)), collapse=", "))
+# Device-day analysis sample --------------------------------------------
+# Select the longest eligible park visit per device-day, retaining source records.
+if (file.exists(device_sample_path)) {
+  dfst_selected<-arrow::read_parquet(device_sample_path)
+  if ("geom" %in% names(dfst_selected) && inherits(dfst$geom,"sfc")) {
+    dfst_selected$geom<-sf::st_as_sfc(
+      structure(lapply(dfst_selected$geom,as.raw),class="WKB"),
+      crs=sf::st_crs(dfst$geom)
+    )
   }
-  cbg_site_visits <- dfst %>%
-    sf::st_drop_geometry() %>%
-    dplyr::select(dplyr::all_of(needed_visits)) %>%
-    mutate(
-      DAY_IN_FEATURE=as.Date(DAY_IN_FEATURE),
-      FEATUREID=as.character(FEATUREID),
-      CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
-    ) %>%
-    filter(
-      !is.na(DAY_IN_FEATURE),
-      as.integer(format(DAY_IN_FEATURE, "%Y")) == analysis_year,
-      !is.na(DEVICEID), !is.na(FEATUREID), !is.na(CENSUS_BLOCK_GROUP_ID),
-      is.finite(timespan_min), is.finite(calibrated_visits), calibrated_visits > 0
-    ) %>%
-    semi_join(site_attributes %>% dplyr::select(FEATUREID), by="FEATUREID") %>%
-    group_by(DEVICEID, DAY_IN_FEATURE) %>%
-    slice_max(timespan_min, n=1, with_ties=FALSE) %>%
-    ungroup() %>%
-    group_by(CENSUS_BLOCK_GROUP_ID, FEATUREID) %>%
+} else {
+  dfst_selected<-local({
+    if (!exists("dfst",inherits=TRUE)) stop("dfst is required to construct the analysis sample.")
+    needed_visits<-c("DEVICEID","DAY_IN_FEATURE","FEATUREID",
+                     "CENSUS_BLOCK_GROUP_ID","timespan_min","calibrated_visits")
+    if (!all(needed_visits %in% names(dfst))) {
+      stop("Missing dfst columns: ",
+           paste(setdiff(needed_visits,names(dfst)),collapse=", "))
+    }
+
+    rows<-dfst |>
+      sf::st_drop_geometry() |>
+      dplyr::select(dplyr::all_of(needed_visits)) |>
+      mutate(
+        .source_row=row_number(),
+        DAY_IN_FEATURE=as.Date(DAY_IN_FEATURE),
+        FEATUREID=as.character(FEATUREID),
+        CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
+      ) |>
+      filter(
+        !is.na(DAY_IN_FEATURE),
+        as.integer(format(DAY_IN_FEATURE,"%Y"))==analysis_year,
+        !is.na(DEVICEID),!is.na(FEATUREID),!is.na(CENSUS_BLOCK_GROUP_ID),
+        is.finite(timespan_min),is.finite(calibrated_visits),calibrated_visits>0
+      ) |>
+      semi_join(site_attributes |> dplyr::select(FEATUREID),by="FEATUREID") |>
+      group_by(DEVICEID,DAY_IN_FEATURE) |>
+      slice_max(timespan_min,n=1,with_ties=FALSE) |>
+      ungroup() |>
+      pull(.source_row)
+
+    dfst[rows,] |>
+      mutate(
+        DAY_IN_FEATURE=as.Date(DAY_IN_FEATURE),
+        FEATUREID=as.character(FEATUREID),
+        CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID)
+      )
+  })
+  if (nrow(dfst_selected)==0L) stop("No visitor-days in the analysis year.")
+  local({
+    cache<-as.data.frame(dfst_selected)
+    if ("geom" %in% names(cache) && inherits(cache$geom,"sfc")) {
+      cache$geom<-sf::st_as_binary(cache$geom)
+      class(cache$geom)<-c("arrow_binary","vctrs_vctr",class(cache$geom),"list")
+    }
+    arrow::write_parquet(cache,device_sample_path,compression="zstd")
+  })
+}
+
+# Aggregate selected visitor-days to origin-site counts.
+if (!file.exists(counts_path)) {
+  cbg_site_visits<-dfst_selected |>
+    sf::st_drop_geometry() |>
+    group_by(CENSUS_BLOCK_GROUP_ID,FEATUREID) |>
     summarise(
       device_visitor_days=n(),
       calibrated_visitor_days=sum(calibrated_visits),
       .groups="drop"
     )
-  if (nrow(cbg_site_visits) == 0L) stop("No visitor-days in the analysis year.")
-  arrow::write_parquet(cbg_site_visits, counts_path, compression="zstd")
+  arrow::write_parquet(cbg_site_visits,counts_path,compression="zstd")
 }
-cbg_site_visits <- arrow::read_parquet(counts_path) %>%
+cbg_site_visits<-arrow::read_parquet(counts_path) |>
   mutate(
     CENSUS_BLOCK_GROUP_ID=as.character(CENSUS_BLOCK_GROUP_ID),
     FEATUREID=as.character(FEATUREID)
   )
+if (nrow(cbg_site_visits)==0L) stop("No visitor-days in the analysis year.")
+if (nrow(dfst_selected)!=sum(cbg_site_visits$device_visitor_days) ||
+    !isTRUE(all.equal(sum(dfst_selected$calibrated_visits),
+                      sum(cbg_site_visits$calibrated_visitor_days),
+                      tolerance=1e-8))) {
+  stop("Cached visit counts do not match selected device records; delete ",
+       counts_path," and rerun.")
+}
 
 
 # Construct origin-site model data -------------------------------------------------
@@ -186,7 +231,7 @@ cbg_site_model <- local({
     semi_join(eligible_origins, by="CENSUS_BLOCK_GROUP_ID") %>%
     inner_join(
       site_attributes %>%
-        dplyr::select(FEATUREID, mangrove_ha, dplyr::all_of(site_terms)),
+        dplyr::select(FEATUREID, mangrove_ha, park_ha, dplyr::all_of(site_terms)),
       by="FEATUREID"
     ) %>%
     filter(
@@ -204,7 +249,7 @@ cbg_site_model <- local({
     ) %>%
     dplyr::select(
       CENSUS_BLOCK_GROUP_ID, FEATUREID, travel_cost_dollars,
-      med_hh_income, mangrove_ha, dplyr::all_of(site_terms)
+      med_hh_income, mangrove_ha, park_ha, dplyr::all_of(site_terms)
     )
 
   if (anyDuplicated(model[c("CENSUS_BLOCK_GROUP_ID", "FEATUREID")])) {
@@ -261,6 +306,30 @@ cbg_site_model <- local({
   model
 })
 
+# Retain the device records represented by the final origin-site choice sets.
+dfst_model<-dfst_selected |>
+  inner_join(
+    cbg_site_model |>
+      filter(device_visitor_days>0) |>
+      dplyr::select(
+        CENSUS_BLOCK_GROUP_ID,FEATUREID,
+        rum_travel_cost_dollars=travel_cost_dollars
+      ),
+    by=c("CENSUS_BLOCK_GROUP_ID","FEATUREID")
+  )
+
+rm(dfst_selected)
+
+# Verify device-level and model-level visitation totals.
+stopifnot(
+  nrow(dfst_model)==sum(cbg_site_model$device_visitor_days),
+  isTRUE(all.equal(
+    sum(dfst_model$calibrated_visits),
+    sum(cbg_site_model$calibrated_visitor_days),
+    tolerance=1e-8
+  ))
+)
+
 # Check destination coverage
 choice_set_coverage <- cbg_site_model %>%
   count(CENSUS_BLOCK_GROUP_ID, name = "available_sites") %>%
@@ -314,7 +383,7 @@ fit_site_choice <- function(mangrove_term, controls = character(), data = cbg_si
 m_site_presence <- fit_site_choice("mangrove_presence", site_controls)
 m_site_extent <- fit_site_choice("log_mangrove_ha", site_controls)
 
-# Park-area functional form sensitivity ---------------------------------
+# Park-area functional form sensitivity
 m_site_extent_quadratic <- fixest::fepois(
   device_visitor_days ~ travel_cost_dollars + log_mangrove_ha +
     log_beach_ha + tree_canopy_pct + impervious_pct +
@@ -417,12 +486,7 @@ fit_frequency <- function(iv_term, state_fe = FALSE, data = cbg_annual) {
 }
 m_freq_presence <- fit_frequency("monetary_iv_presence")
 m_freq_extent <- fit_frequency("monetary_iv_extent")
-state_models <- if (dplyr::n_distinct(cbg_annual$state_fips) >= 2L) {
-  list(
-    presence = fit_frequency("monetary_iv_presence", state_fe = TRUE),
-    extent = fit_frequency("monetary_iv_extent", state_fe = TRUE)
-  )
-} else NULL
+state_models <- NULL
 
 cbg_annual <- cbg_annual %>%
   mutate(
@@ -438,42 +502,104 @@ if (any(c(stats::coef(m_freq_presence)[["monetary_iv_presence"]],
 }
 
 # Optional site-by-site marginal annual welfare -------------------------
-# Marginal annual welfare for an additional hectare at each site.
-site_marginals <- if (calculate_site_marginals) {
-  cbg_site_model %>%
-    inner_join(
-      cbg_annual %>%
-        dplyr::select(CENSUS_BLOCK_GROUP_ID, calibrated_visitor_days,
-                      predicted_visits_extent),
-      by = "CENSUS_BLOCK_GROUP_ID",
-      suffix = c("", "_annual")
-    ) %>%
-    mutate(
-      destination_probability = exp(V_extent -
-        iv_data$IV_extent[match(CENSUS_BLOCK_GROUP_ID,
-                                iv_data$CENSUS_BLOCK_GROUP_ID)]),
-      marginal_dollars_per_trip_ha = destination_probability *
-        unname(be[["log_mangrove_ha"]]) /
-        (-unname(be[["travel_cost_dollars"]]) * (1 + mangrove_ha)),
-      conditional_dollars_per_ha = calibrated_visitor_days_annual *
-        marginal_dollars_per_trip_ha,
-      linked_dollars_per_ha = predicted_visits_extent *
-        marginal_dollars_per_trip_ha
-    ) %>%
-    group_by(FEATUREID) %>%
-    summarise(
-      conditional_annual_dollars_per_ha = sum(conditional_dollars_per_ha),
-      linked_annual_dollars_per_ha = sum(linked_dollars_per_ha),
-      .groups = "drop"
-    ) %>%
-    left_join(
-      site_attributes %>%
-        dplyr::select(FEATUREID, site_name, mangrove_presence, mangrove_ha),
-      by = "FEATUREID"
-    ) %>%
-    arrange(desc(linked_annual_dollars_per_ha))
-} else NULL
+# Restoration converts existing non-canopy park land to mature mangrove canopy.
+# Park area, beach area, impervious cover, and other attributes stay fixed.
+site_marginals<-if (calculate_site_marginals) local({
+  gamma<-unname(stats::coef(m_freq_extent)[["monetary_iv_extent"]])
+  cost_coef<--unname(be[["travel_cost_dollars"]])
 
+  cbg_site_model |>
+    inner_join(
+      cbg_annual |>
+        dplyr::select(
+          CENSUS_BLOCK_GROUP_ID,
+          calibrated_visitor_days,
+          predicted_visits_extent
+        ),
+      by="CENSUS_BLOCK_GROUP_ID",
+      suffix=c("","_annual")
+    ) |>
+    mutate(
+      destination_probability=exp(
+        V_extent-iv_data$IV_extent[
+          match(CENSUS_BLOCK_GROUP_ID,iv_data$CENSUS_BLOCK_GROUP_ID)
+        ]
+      ),
+      restoration_capacity_ha=pmax(
+        0,
+        pmin(
+          park_ha*(100-tree_canopy_pct)/100,
+          park_ha-mangrove_ha
+        )
+      ),
+      one_ha_feasible=restoration_capacity_ha>=1 & marine_waterfront==1L,
+      joint_utility_per_ha=
+        unname(be[["log_mangrove_ha"]])/(1+mangrove_ha)+
+        unname(be[["tree_canopy_pct"]])*100/park_ha,
+      marginal_dollars_per_trip_ha=
+        destination_probability*joint_utility_per_ha/cost_coef,
+      conditional_dollars_per_ha=
+        calibrated_visitor_days_annual*marginal_dollars_per_trip_ha,
+      linked_dollars_per_ha=
+        predicted_visits_extent*marginal_dollars_per_trip_ha,
+      utility_change_1ha=if_else(
+        one_ha_feasible,
+        unname(be[["log_mangrove_ha"]])*
+          (log1p(mangrove_ha+1)-log_mangrove_ha)+
+          unname(be[["tree_canopy_pct"]])*100/park_ha,
+        NA_real_
+      ),
+      iv_change_dollars_1ha=log1p(
+        destination_probability*expm1(utility_change_1ha)
+      )/cost_coef,
+      conditional_dollars_1ha=
+        calibrated_visitor_days_annual*iv_change_dollars_1ha,
+      predicted_visit_change_1ha=
+        predicted_visits_extent*expm1(gamma*iv_change_dollars_1ha),
+      linked_dollars_1ha=if (abs(gamma)<1e-10) {
+        predicted_visits_extent*iv_change_dollars_1ha
+      } else {
+        predicted_visits_extent*
+          expm1(gamma*iv_change_dollars_1ha)/gamma
+      }
+    ) |>
+    group_by(FEATUREID) |>
+    summarise(
+      restoration_capacity_ha=first(restoration_capacity_ha),
+      one_ha_feasible=first(one_ha_feasible),
+      conditional_annual_dollars_per_ha=
+        if (first(restoration_capacity_ha)>0) {
+          sum(conditional_dollars_per_ha)
+        } else NA_real_,
+      linked_annual_dollars_per_ha=
+        if (first(restoration_capacity_ha)>0) {
+          sum(linked_dollars_per_ha)
+        } else NA_real_,
+      conditional_annual_dollars_1ha=
+        if (first(one_ha_feasible)) {
+          sum(conditional_dollars_1ha)
+        } else NA_real_,
+      linked_annual_dollars_1ha=
+        if (first(one_ha_feasible)) {
+          sum(linked_dollars_1ha)
+        } else NA_real_,
+      predicted_annual_visit_change_1ha=
+        if (first(one_ha_feasible)) {
+          sum(predicted_visit_change_1ha)
+        } else NA_real_,
+      .groups="drop"
+    ) |>
+    left_join(
+      site_attributes |>
+        dplyr::select(
+          FEATUREID,site_name,mangrove_presence,
+          mangrove_ha,park_ha,tree_canopy_pct
+        ),
+      by="FEATUREID"
+    ) |>
+    filter(one_ha_feasible) |>
+    arrange(desc(linked_annual_dollars_1ha))
+}) else NULL
 
 rum_results <- local({
   # Comparable coefficient and interpretation tables -----------------------------------
@@ -522,8 +648,8 @@ rum_results <- local({
         "Sports facilities: absent to present" = "sports_facilities",
         "Marine waterfront: absent to present" = "marine_waterfront"
       )
-      increments <- c(increments, "Park area: +1 log-area unit" = 1)
-      term_map <- c(term_map, "Park area: +1 log-area unit" = "log_park_area")
+      increments <- c(increments, "Park area: doubled" = log(2))
+      term_map <- c(term_map, "Park area: doubled" = "log_park_area")
       mangrove_label <- if (model == "Presence")
         "Mangroves: absent to present" else "Mangroves: 0 to 1 ha"
       increments <- c(increments, stats::setNames(
@@ -655,7 +781,7 @@ rum_results <- local({
                  y = linked_annual_dollars_per_ha)) +
       geom_col() + coord_flip() +
       labs(title = "Largest site-level marginal mangrove values",
-           subtitle = "Local annual $/ha derivative using predicted baseline trips",
+           subtitle = "Joint mangrove and canopy effect; local derivative at baseline trips",
            x = NULL, y = "Annual marginal welfare ($/additional ha)") +
       theme_minimal()
   }
@@ -901,4 +1027,14 @@ print(fixest::etable(
 print(rum_results$tables$site_sensitivity, n = Inf, width = Inf)
 cat("\nResults available in rum_results$models, $tables, $figures, and $data.\n")
 
-#writeClipboard(paste(capture.output({ print(fixest::etable(rum_results$models$site_presence, rum_results$models$site_extent)); print(fixest::etable(rum_results$models$frequency_presence, rum_results$models$frequency_extent)); print(rum_results$tables) }), collapse="\r\n"))
+writeClipboard(paste(capture.output({ print(fixest::etable(rum_results$models$site_presence, rum_results$models$site_extent)); print(fixest::etable(rum_results$models$frequency_presence, rum_results$models$frequency_extent)); print(rum_results$tables) }), collapse="\r\n"))
+
+rm(
+  cbg_site_model, cbg_site_visits, cbg_annual, site_attributes,
+  site_checks, site_controls, site_terms, needed_site, choice_set_coverage,
+  iv_data, site_marginals, m_site_presence, m_site_extent,
+  m_site_extent_quadratic, m_site_progression, m_freq_presence,
+  m_freq_extent, bp, be, state_models, fit_site_choice, fit_frequency,
+  travel_cost_params, analysis_year, fit_origin_sample,
+  calculate_site_marginals, n_threads, cache_dir, device_sample_path
+)
