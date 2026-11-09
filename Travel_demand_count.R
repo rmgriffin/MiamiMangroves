@@ -960,6 +960,111 @@ rum_results$tables$mangrove_progression <- purrr::imap_dfr(
   }
 )
 
+rum_results$models$site_progression<-m_site_progression
+
+rum_results$tables$site_marginals<-local({ # Mangrove and canopy welfare decomposition
+  bm<-unname(coef(rum_results$models$site_extent)[["log_mangrove_ha"]])
+  bc<-unname(coef(rum_results$models$site_extent)[["tree_canopy_pct"]])
+  bt<-unname(coef(rum_results$models$site_extent)[["travel_cost_dollars"]])
+  gamma<-unname(coef(rum_results$models$frequency_extent)[["monetary_iv_extent"]])
+
+  d<-cbg_site_model |>
+    semi_join(
+      rum_results$tables$site_marginals |>
+        slice_max(order_by=abs(linked_annual_dollars_1ha),n=15,with_ties=FALSE) |>
+        dplyr::select(FEATUREID),
+      by="FEATUREID"
+    ) |>
+    inner_join(
+      cbg_annual |>
+        dplyr::select(CENSUS_BLOCK_GROUP_ID,IV_extent,predicted_visits_extent),
+      by="CENSUS_BLOCK_GROUP_ID"
+    ) |>
+    mutate(
+      p=exp(V_extent-IV_extent),
+      delta_m=bm*(log1p(mangrove_ha+1)-log1p(mangrove_ha)),
+      delta_c=bc*100/park_ha,
+      iv_m=log1p(p*expm1(delta_m))/-bt,
+      iv_c=log1p(p*expm1(delta_c))/-bt,
+      iv_both=log1p(p*expm1(delta_m+delta_c))/-bt,
+      w_m=predicted_visits_extent*expm1(gamma*iv_m)/gamma,
+      w_c=predicted_visits_extent*expm1(gamma*iv_c)/gamma,
+      w_both=predicted_visits_extent*expm1(gamma*iv_both)/gamma
+    ) |>
+    group_by(FEATUREID) |>
+    summarise(
+      mangrove_welfare_1ha=sum((w_m+w_both-w_c)/2),
+      canopy_welfare_1ha=sum((w_c+w_both-w_m)/2),
+      calibrated_site_visitor_days=sum(calibrated_visitor_days),
+      .groups="drop"
+    )
+
+  rum_results$tables$site_marginals |>
+    left_join(d,by="FEATUREID")
+})
+
+
+rum_results$tables$site_responses<-local({ # Welfare response decomposition
+  bm<-unname(coef(rum_results$models$site_extent)[["log_mangrove_ha"]])
+  bc<-unname(coef(rum_results$models$site_extent)[["tree_canopy_pct"]])
+  bt<-unname(coef(rum_results$models$site_extent)[["travel_cost_dollars"]])
+  gamma<-unname(coef(rum_results$models$frequency_extent)[["monetary_iv_extent"]])
+
+  cbg_site_model |>
+    semi_join(
+      rum_results$tables$site_marginals |>
+        filter(
+          !is.na(mangrove_welfare_1ha),
+          calibrated_site_visitor_days>0
+        ) |>
+        dplyr::select(FEATUREID),
+      by="FEATUREID"
+    ) |>
+    inner_join(
+      cbg_annual |>
+        dplyr::select(
+          CENSUS_BLOCK_GROUP_ID,
+          IV_extent,
+          predicted_visits_extent
+        ),
+      by="CENSUS_BLOCK_GROUP_ID"
+    ) |>
+    mutate(
+      p0=exp(V_extent-IV_extent),
+      delta_v=bm*(log1p(mangrove_ha+1)-log1p(mangrove_ha))+
+        bc*100/park_ha,
+      delta_iv=log1p(p0*expm1(delta_v))/(-bt),
+      direct_welfare=predicted_visits_extent*p0*delta_v/(-bt),
+      substitution_welfare=predicted_visits_extent*
+        (delta_iv-p0*delta_v/(-bt)),
+      frequency_adjustment=predicted_visits_extent*
+        (expm1(gamma*delta_iv)/gamma-delta_iv)
+    ) |>
+    group_by(FEATUREID) |>
+    summarise(
+      direct_welfare=sum(direct_welfare),
+      substitution_welfare=sum(substitution_welfare),
+      frequency_adjustment=sum(frequency_adjustment),
+      .groups="drop"
+    ) |>
+    left_join(
+      rum_results$tables$site_marginals |>
+        dplyr::select(
+          FEATUREID,
+          site_name,
+          linked_annual_dollars_1ha,
+          calibrated_site_visitor_days
+        ),
+      by="FEATUREID"
+    ) |>
+    mutate(
+      net_welfare=direct_welfare+
+        substitution_welfare+frequency_adjustment
+    )
+})
+
+
+
 # Consolidated output -----------------------------------------------------
 # Model summaries and synthesis figures.
 cat("\n================ MIAMI MANGROVE RECREATION RUM ================\n")
