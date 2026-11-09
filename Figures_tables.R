@@ -10,7 +10,7 @@
 
 # Data for this repository is at https://drive.google.com/drive/folders/1syX_y2lMbo-ETNBXAo24m2FWUK1q60Ux?usp=sharing
 
-pkgs<-c("tidyverse","arrow","sf","shiny","mapgl")
+pkgs<-c("tidyverse","arrow","sf","shiny","mapgl","gt")
 
 missing<-pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]
 if (length(missing)>0) {
@@ -23,90 +23,163 @@ rm(pkgs, missing)
 
 
 # Load data --------------------------------------------------------------
-source("Travel_demand.R")
+source("Travel_demand_count.R")
 
-
-# Site stats -------------------------------------------------------------
-local({ # Park stats
-  d<-dfst |>
-    st_drop_geometry() |>
-    mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))) |>
-    filter(year==2024) |>
-    mutate(total_unique_devices=n_distinct(DEVICEID, na.rm=TRUE)) |>
-    group_by(FEATUREID, Name) |>
-    summarise(
-      annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
-      observed_device_days=n(),
-      site_device_pairs=n_distinct(DEVICEID, na.rm=TRUE),
-      total_unique_devices=first(total_unique_devices),
-      median_distance_km=median(outbound_distance_m/1000, na.rm=TRUE),
-      median_duration_min=median(outbound_duration_min, na.rm=TRUE),
-      .groups="drop"
-    ) |>
-    summarise(
-      parks=n_distinct(FEATUREID),
-      annual_visitor_days=sum(annual_visitor_days),
-      observed_device_days=sum(observed_device_days),
-      unique_device_ids=first(total_unique_devices),
-      site_device_pairs=sum(site_device_pairs),
-      median_park_travel_distance_km=median(median_distance_km, na.rm=TRUE),
-      median_park_travel_time_min=median(median_duration_min, na.rm=TRUE)
-    ) |>
-    pivot_longer(everything(), names_to="metric", values_to="value") |>
-    mutate(
-      metric=recode(metric,
-        parks="Parks", annual_visitor_days="Calibrated annual visitor-days",
-        observed_device_days="Observed device-days", unique_device_ids="Unique device IDs",
-        site_device_pairs="Site-device pairs",
-        median_park_travel_distance_km="Median park one-way travel distance",
-        median_park_travel_time_min="Median park one-way travel time"),
-      value=case_when(
-        str_detect(metric, "distance") ~ paste0(round(value, 1), " km"),
-        str_detect(metric, "time") ~ paste0(round(value, 1), " min"),
-        TRUE ~ scales::comma(round(value))),
-      y=rev(row_number()), shade=row_number()%%2==0
-    )
-
-  ggplot(d) +
-    geom_rect(data=filter(d, shade), aes(ymin=y-.5, ymax=y+.5),
-              xmin=-.05, xmax=2.75, fill="grey95", inherit.aes=FALSE) +
-    geom_text(aes(0, y, label=metric), hjust=0, size=3.8) +
-    geom_text(aes(2.7, y, label=value), hjust=1, size=3.8) +
-    annotate("text", x=c(0,2.7), y=max(d$y)+1, label=c("Metric","Value"),
-             hjust=c(0,1), fontface="bold", size=3.8) +
-    geom_hline(yintercept=max(d$y)+1.55, linewidth=.7) +
-    geom_hline(yintercept=max(d$y)+.5, linewidth=.4) +
-    geom_hline(yintercept=.5, linewidth=.7) +
-    coord_cartesian(xlim=c(-.05,2.75), ylim=c(.3,max(d$y)+1.7), clip="off") +
-    labs(title="Park sample summary, 2024", 
-         # subtitle="2024",
-         caption="Note: Travel distance and time are one-way park-level medians based on outbound routing.") +
-    theme_void() +
-    theme(plot.title=element_text(size=13),
-          plot.subtitle=element_text(size=10),
-          plot.caption=element_text(hjust=0, size=8),
-          plot.margin=margin(10,20,10,10))
-})
-
-dfst |> # Map of annual visitation
-  dplyr::select(FEATUREID, Name, Jurisdiction, geom) |>
-  distinct(FEATUREID, .keep_all=TRUE) |>
-  st_as_sf(sf_column_name="geom") |>
+# Park summaries ---------------------------------------------------------
+site_summary<-rum_results$data$site_attributes |>
   left_join(
-    dfst |>
-      st_drop_geometry() |>
-      mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))) |>
-      filter(year==2024) |>
+    dfst_model |>
+      sf::st_drop_geometry() |>
       group_by(FEATUREID) |>
       summarise(
-        annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
-        observed_device_days=n(),
-        unique_devices=n_distinct(DEVICEID),
+        device_visitor_days=n(),
+        calibrated_visitor_days=sum(calibrated_visits),
         .groups="drop"
       ),
     by="FEATUREID"
   ) |>
   mutate(
+    park_ha=expm1(log_park_area)/10000,
+    device_visitor_days=replace_na(device_visitor_days,0),
+    calibrated_visitor_days=replace_na(calibrated_visitor_days,0),
+    mangrove_group=if_else(mangrove_presence==1L,"Mangroves","No mangroves")
+  )
+
+
+# Site stats -------------------------------------------------------------
+local({ # Park characteristics and visitation
+  fmt<-function(x,accuracy=.1) {
+    if (!is.finite(x)) return("NA")
+    scales::comma(x,accuracy=accuracy)
+  }
+
+  mean_sd<-function(x,accuracy=.1) {
+    paste0(fmt(mean(x,na.rm=TRUE),accuracy),
+           " (",fmt(sd(x,na.rm=TRUE),accuracy),")")
+  }
+
+  d<-site_summary |>
+    left_join(
+      dfst_model |>
+        st_drop_geometry() |>
+        group_by(FEATUREID) |>
+        summarise(
+          site_device_pairs=n_distinct(DEVICEID,na.rm=TRUE),
+          median_distance_km=median(outbound_distance_m/1000,na.rm=TRUE),
+          median_duration_min=median(outbound_duration_min,na.rm=TRUE),
+          .groups="drop"
+        ),
+      by="FEATUREID"
+    )
+
+  site_descriptives<-function(x,group) {
+    tibble(
+      characteristic=c(
+        "Total parks",
+        "Calibrated annual visitor-days",
+        "Observed device-days",
+        "Unique device IDs",
+        "Unique device–park combinations",
+        "Park area (ha)",
+        "Mangrove area (ha)",
+        "Beach area (ha)",
+        "Tree canopy (%)",
+        "Impervious cover (%)",
+        "Marine waterfront (%)",
+        "Sports facilities (%)",
+        "Annual visitor-days per park",
+        "One-way travel distance (km)",
+        "One-way travel time (min)"
+      ),
+      value=c(
+        scales::comma(nrow(x)),
+        scales::comma(sum(x$calibrated_visitor_days)),
+        scales::comma(sum(x$device_visitor_days)),
+        scales::comma(n_distinct(
+          dfst_model$DEVICEID[
+            dfst_model$FEATUREID %in% x$FEATUREID
+          ],
+          na.rm=TRUE
+        )),
+        scales::comma(sum(x$site_device_pairs,na.rm=TRUE)),
+        mean_sd(x$park_ha),
+        mean_sd(x$mangrove_ha),
+        mean_sd(x$beach_area_ha),
+        mean_sd(x$tree_canopy_pct),
+        mean_sd(x$impervious_pct),
+        fmt(100*mean(x$marine_waterfront,na.rm=TRUE)),
+        fmt(100*mean(x$sports_facilities,na.rm=TRUE)),
+        mean_sd(x$calibrated_visitor_days,accuracy=1),
+        mean_sd(x$median_distance_km),
+        mean_sd(x$median_duration_min)
+      ),
+      group=group
+    )
+  }
+
+  d<-list(
+    "All parks"=d,
+    "No mangroves"=filter(d,mangrove_presence==0L),
+    "Mangroves"=filter(d,mangrove_presence==1L)
+  ) |>
+    purrr::imap_dfr(site_descriptives) |>
+    pivot_wider(names_from=group,values_from=value) |>
+    dplyr::select(characteristic,`All parks`,`No mangroves`,Mangroves) |>
+    gt::gt() |>
+    gt::tab_row_group(
+      label="Devices and visits",
+      rows=characteristic %in% c(
+        "Calibrated annual visitor-days",
+        "Observed device-days",
+        "Unique device IDs",
+        "Unique device–park combinations",
+        "Annual visitor-days per park",
+        "One-way travel distance (km)",
+        "One-way travel time (min)"
+      )
+    ) |>
+    gt::tab_row_group(
+      label="Park attributes",
+      rows=characteristic %in% c(
+        "Total parks",
+        "Park area (ha)",
+        "Mangrove area (ha)",
+        "Beach area (ha)",
+        "Tree canopy (%)",
+        "Impervious cover (%)",
+        "Marine waterfront (%)",
+        "Sports facilities (%)"
+      )
+    ) |>
+    gt::row_group_order(
+      groups=c("Park attributes","Devices and visits")
+    ) |>
+    gt::cols_label(
+      characteristic="Characteristic"
+    ) |>
+    gt::cols_align(
+      align="right",
+      columns=c(`All parks`,`No mangroves`,Mangroves)
+    ) |>
+    project_table(
+      title="Park characteristics and recreational visitation, 2024",
+      note="Continuous variables are reported as mean (standard deviation), and binary attributes as percentages. Travel statistics summarize park-level median travel distances and times for visited parks. Unique device IDs are not additive across groups."
+    )
+
+  print(d)
+})
+
+
+df |> # Map of annual visitation for the RUM estimation sample
+  mutate(FEATUREID=as.character(id)) |>
+  semi_join(site_summary |> dplyr::select(FEATUREID),by="FEATUREID") |>
+  left_join(
+    site_summary |>
+      dplyr::select(FEATUREID,annual_visitor_days=calibrated_visitor_days),
+    by="FEATUREID"
+  ) |>
+  mutate(
+    annual_visitor_days=replace_na(annual_visitor_days,0),
     visitor_days_class=as.character(cut(
       annual_visitor_days,
       breaks=c(-Inf,2500,10000,50000,250000,1000000,Inf),
@@ -120,7 +193,7 @@ dfst |> # Map of annual visitation
     style=mapgl::openfreemap_style("positron"),
     bounds=x
   ) |>
-    mapgl::add_source(id="parks", data=x) |>
+    mapgl::add_source(id="parks",data=x) |>
     mapgl::add_fill_layer(
       id="visitor-days",
       source="parks",
@@ -136,7 +209,7 @@ dfst |> # Map of annual visitation
       tooltip="Name"
     ) |>
     mapgl::add_legend(
-      "Calibrated visitor-days, 2024",
+      "Calibrated visitor-days, 2024 (RUM sample)",
       values=c("< 2,500","2,500 - 9,999","10,000 - 49,999",
                "50,000 - 249,999","250,000 - 999,999","1,000,000+"),
       colors=c("#7FC8E3","#42A5D5","#1F78B4","#155A96","#103E73","#08264F"),
@@ -145,59 +218,105 @@ dfst |> # Map of annual visitation
     )
   )()
 
-selected_ids <- c("93","357","358","68","24","97","353","57","130","100","14","355","122","98","30","96","135","102","134","136","356","1")  # Mangrove FEATUREIDs
+local({ # Park size and visitation
+  d<-site_summary |>
+    filter(park_ha>0) |>
+    ggplot(aes(park_ha,calibrated_visitor_days+1,color=mangrove_group)) +
+    geom_point(alpha=.75,size=1.9) +
+    scale_x_log10(labels=scales::comma) +
+    scale_y_log10(labels=scales::comma) +
+    labs(
+      title="Park area and recreational visitation",
+      x="Park area (ha, log scale)",
+      y="Calibrated annual visitor-days + 1 (log scale)",
+      color=NULL
+    ) +
+    theme_minimal(base_size=11) +
+    theme(
+      plot.title=element_text(face="bold",size=12),
+      panel.grid.minor=element_blank(),
+      legend.position="bottom"
+    )
 
-dfst |> # Calibrated visitor days by park for high and low visitation parks
-  st_drop_geometry() |>
+  print(d)
+})
+
+site_summary |> # Calibrated visitor-days by park for high and low visitation parks
   mutate(
-    year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-    FEATUREID=trimws(as.character(FEATUREID))
-  ) |>
-  filter(year == 2024) |>
-  group_by(FEATUREID, Name, Jurisdiction) |>
-  summarise(
-    annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
-    observed_device_days=n(),
-    unique_devices=n_distinct(DEVICEID),
-    .groups="drop"
+    annual_visitor_days=calibrated_visitor_days
   ) |>
   arrange(desc(annual_visitor_days)) |>
   mutate(rank=row_number()) |>
   (\(x) bind_rows(
     x |>
-      slice_max(annual_visitor_days, n=30, with_ties=FALSE) |>
+      slice_max(annual_visitor_days,n=30,with_ties=FALSE) |>
       mutate(panel="A. Highest visitation parks"),
     x |>
-      filter(FEATUREID %in% trimws(as.character(selected_ids))) |>
+      filter(mangrove_presence==1L) |>
       mutate(panel="B. Parks with mangroves")
   ))() |>
   mutate(
-    panel=factor(panel, levels=c("A. Highest visitation parks", "B. Parks with mangroves")),
-    site_label=paste0(Name, " [rank ", rank, "]")
+    panel=factor(panel,levels=c("A. Highest visitation parks","B. Parks with mangroves")),
+    site_label=paste0(str_to_title(site_name)," [rank ",rank,"]")
   ) |>
-  ggplot(aes(annual_visitor_days, reorder(site_label, annual_visitor_days))) +
+  ggplot(aes(annual_visitor_days,reorder(site_label,annual_visitor_days))) +
   geom_col() +
   geom_text(
     aes(label=scales::comma(round(annual_visitor_days))),
     hjust=-0.1,
     size=3
   ) +
-  facet_wrap(~panel, scales="free_y", ncol=1, drop=FALSE) +
+  facet_wrap(~panel,scales="free_y",ncol=1,drop=FALSE) +
   scale_x_continuous(
     labels=scales::comma,
-    expand=expansion(mult=c(0, 0.18))
+    expand=expansion(mult=c(0,0.18))
   ) +
   coord_cartesian(clip="off") +
   labs(
     x="Visitor-days",
     y=NULL,
     title="Calibrated visitor-days by site, 2024",
-    subtitle="Site rank shown in brackets"
+    subtitle="Nationwide RUM estimation sample; site rank shown in brackets"
   ) +
   theme_minimal() +
-  theme(
-    plot.margin=margin(5.5, 35, 5.5, 5.5)
-  )
+  theme(plot.margin=margin(5.5,35,5.5,5.5))
+
+dfst_model |> # Observed visitor-days per device ID, 2024
+  st_drop_geometry() |>
+  filter(!is.na(DEVICEID)) |>
+  group_by(DEVICEID) |>
+  summarise(
+    n_visits=n(),
+    state_fips=first(substr(CENSUS_BLOCK_GROUP_ID[!is.na(CENSUS_BLOCK_GROUP_ID)], 1, 2),
+                     default=NA_character_),
+    .groups="drop"
+  ) |>
+  filter(!is.na(state_fips)) |>
+  mutate(
+    location=factor(if_else(state_fips=="12", "Florida", "Outside Florida"),
+                    levels=c("Florida", "Outside Florida")),
+    freq_bin=cut(n_visits, breaks=c(1,2,3,5,10,25,50,100,250,Inf), right=FALSE,
+                 labels=c("1","2","3-4","5-9","10-24","25-49","50-99","100-249","250+"))
+  ) |>
+  count(freq_bin, location, name="n_devices") |>
+  mutate(share_devices=n_devices/sum(n_devices)) |>
+  ggplot(aes(freq_bin, share_devices, fill=location)) +
+  geom_col(color="black", linewidth=.25) +
+  scale_fill_manual(
+    values=c("Florida"="white", "Outside Florida"="grey55")) +
+  geom_text(
+    aes(label=if_else(share_devices>=.005,
+                      scales::percent(share_devices, accuracy=.1), "")),
+    position=position_stack(vjust=.5), size=3
+  ) +
+  scale_y_continuous(labels=scales::percent, expand=expansion(mult=c(0,.1))) +
+  labs(
+    x="Park visitor-days per device ID",
+    y="Share of device IDs",
+    fill="Home location",
+    title="Park visits per device ID, 2024"
+  ) +
+  theme_minimal()
 
 dfst |> # Observed visitor-days per device ID, 2024
   st_drop_geometry() |>
@@ -327,157 +446,84 @@ dfst |> # Most common same-day park pairs
 
 
 # Calibration ------------------------------------------------------------
-local({ # Oleta State Park visitors and device stats
+local({ # Visitor calibration
   d<-Oleta |>
-    arrange(month) |>
-    transmute(Month=month_name, Visitors=counts, `Observed device visits`=device_visits,
-              `Visitors per device`=counts/device_visits) |>
-    (\(x) bind_rows(x, tibble(
-      Month="Annual total", Visitors=sum(x$Visitors, na.rm=TRUE),
-      `Observed device visits`=sum(x$`Observed device visits`, na.rm=TRUE),
-      `Visitors per device`=sum(x$Visitors, na.rm=TRUE)/sum(x$`Observed device visits`, na.rm=TRUE))))() |>
-    mutate(y=rev(row_number()), total=Month=="Annual total", shade=row_number()%%2==0,
-           visitors_label=scales::comma(Visitors, accuracy=1),
-           devices_label=scales::comma(`Observed device visits`, accuracy=1),
-           ratio_label=scales::number(`Visitors per device`, accuracy=.1))
-
-  ggplot(d) +
-    geom_rect(data=filter(d, shade, !total), aes(ymin=y-.5, ymax=y+.5),
-              xmin=-.1, xmax=3.2, fill="grey95", inherit.aes=FALSE) +
-    geom_text(aes(0, y, label=Month, fontface=if_else(total, "bold", "plain")), hjust=0, size=3.7) +
-    geom_text(aes(1.2, y, label=visitors_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    geom_text(aes(2.25, y, label=devices_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    geom_text(aes(3.15, y, label=ratio_label, fontface=if_else(total, "bold", "plain")), hjust=1, size=3.7) +
-    annotate("text", x=c(0,1.2,2.25,3.15), y=max(d$y)+1,
-             label=c("Month","Visitor\ncount","Observed visitor\ndays","Visitors per\nobserved device"),
-             hjust=c(0,1,1,1), fontface="bold", size=3.7) +
-    geom_hline(yintercept=max(d$y)+1.55, linewidth=.7) +
-    geom_hline(yintercept=max(d$y)+.5, linewidth=.4) +
-    geom_hline(yintercept=1.5, linewidth=.4) +
-    geom_hline(yintercept=.5, linewidth=.7) +
-    coord_cartesian(xlim=c(-.1,3.2), ylim=c(.3,max(d$y)+1.7), clip="off") +
-    labs(title="Oleta River State Park visitor counts and device calibration, 2024", 
-         #subtitle="2024",
-         caption="Note: Visitors per observed device equals visitor count divided by observed visitor days.") +
-    theme_void() +
-    theme(plot.title=element_text(size=13), plot.subtitle=element_text(size=10),
-          plot.caption=element_text(hjust=0, size=8), plot.margin=margin(10,15,10,10))
-})
-
-local({ # Miami enplanements and devices
-  d<-mia_enplanements_monthly |>
-    arrange(month) |>
     transmute(
-      Month=month_name,
-      Enplanements=enplanements,
-      `Observed devices`=device_enplanements,
-      `Enplanements per device`=enplanements / device_enplanements
+      month, Month=month_name,
+      park_visitors=counts,
+      park_devices=device_visits
     ) |>
-    (\(x) bind_rows(
-      x,
-      tibble(
-        Month="Annual total",
-        Enplanements=sum(x$Enplanements, na.rm=TRUE),
-        `Observed devices`=sum(x$`Observed devices`, na.rm=TRUE),
-        `Enplanements per device`=
-          sum(x$Enplanements, na.rm=TRUE) /
-          sum(x$`Observed devices`, na.rm=TRUE)
-      )
-    ))() |>
+    full_join(
+      mia_enplanements_monthly |>
+        transmute(
+          month, Month_mia=month_name,
+          airport_visitors=enplanements,
+          airport_devices=device_enplanements
+        ),
+      by="month"
+    ) |>
+    arrange(month) |>
     mutate(
-      y=rev(row_number()),
-      total=Month == "Annual total",
-      shade=row_number() %% 2 == 0,
-      enplanements_label=scales::comma(Enplanements, accuracy=1),
-      devices_label=scales::comma(`Observed devices`, accuracy=1),
-      ratio_label=scales::number(`Enplanements per device`, accuracy=0.1)
+      Month=coalesce(Month,Month_mia),
+      park_ratio=park_visitors/park_devices,
+      airport_ratio=airport_visitors/airport_devices
+    ) |>
+    select(-month,-Month_mia) |>
+    (\(x) bind_rows(x,tibble(
+      Month="Annual total",
+      park_visitors=sum(x$park_visitors,na.rm=TRUE),
+      park_devices=sum(x$park_devices,na.rm=TRUE),
+      airport_visitors=sum(x$airport_visitors,na.rm=TRUE),
+      airport_devices=sum(x$airport_devices,na.rm=TRUE),
+      park_ratio=park_visitors/park_devices,
+      airport_ratio=airport_visitors/airport_devices
+    )))() |>
+    gt::gt() |>
+    gt::tab_spanner(
+      label="Oleta River State Park",
+      columns=c(park_visitors,park_devices,park_ratio)
+    ) |>
+    gt::tab_spanner(
+      label="Miami International Airport",
+      columns=c(airport_visitors,airport_devices,airport_ratio)
+    ) |>
+    gt::cols_label(
+      Month="Month",
+      park_visitors="Visitors",
+      park_devices="Device visits",
+      park_ratio="Visitors/device",
+      airport_visitors="Enplanements",
+      airport_devices="Device enplanements",
+      airport_ratio="Passengers/device"
+    ) |>
+    gt::cols_move_to_end(columns=c(airport_visitors,airport_devices,airport_ratio)) |>
+    gt::fmt_number(
+      columns=c(park_visitors,park_devices,airport_visitors,airport_devices),
+      decimals=0
+    ) |>
+    gt::fmt_number(
+      columns=c(park_ratio,airport_ratio),
+      decimals=1
+    ) |>
+    gt::cols_align(
+      align="right",
+      columns=c(park_visitors,park_devices,park_ratio,
+                airport_visitors,airport_devices,airport_ratio)
+    ) |>
+    gt::tab_style(
+      style=gt::cell_text(weight="bold"),
+      locations=gt::cells_body(rows=Month=="Annual total")
+    ) |>
+    gt::tab_style(
+      style=gt::cell_borders(sides="top",color="black",weight=gt::px(1)),
+      locations=gt::cells_body(rows=Month=="Annual total")
+    ) |>
+    project_table(
+      title="Visitor calibration at Oleta River State Park and Miami International Airport, 2024",
+      note="Calibration factors are calculated as visitor counts divided by observed device visits at Oleta River State Park and passenger enplanements divided by observed device enplanements at Miami International Airport. Annual factors are calculated from annual totals."
     )
 
-  p<-ggplot(d) +
-    geom_rect(
-      data=filter(d, shade, !total),
-      aes(ymin=y - 0.5, ymax=y + 0.5),
-      xmin=-0.1,
-      xmax=3.25,
-      fill="grey95",
-      inherit.aes=FALSE
-    ) +
-    geom_text(
-      aes(0, y, label=Month, fontface=if_else(total, "bold", "plain")),
-      hjust=0,
-      size=3.7
-    ) +
-    geom_text(
-      aes(1.25, y, label=enplanements_label,
-          fontface=if_else(total, "bold", "plain")),
-      hjust=1,
-      size=3.7
-    ) +
-    geom_text(
-      aes(2.25, y, label=devices_label,
-          fontface=if_else(total, "bold", "plain")),
-      hjust=1,
-      size=3.7
-    ) +
-    geom_text(
-      aes(3.2, y, label=ratio_label,
-          fontface=if_else(total, "bold", "plain")),
-      hjust=1,
-      size=3.7
-    ) +
-    annotate(
-      "text",
-      x=c(0, 1.25, 2.25, 3.2),
-      y=max(d$y) + 1,
-      label=c(
-        "Month",
-        "Passenger\nenplanements",
-        "Observed device\nenplanements",
-        "Passengers per\nobserved device"
-      ),
-      hjust=c(0, 1, 1, 1),
-      fontface="bold",
-      size=3.7
-    ) +
-    geom_hline(
-      yintercept=c(max(d$y) + 1.55, max(d$y) + 0.5),
-      linewidth=c(0.7, 0.4)
-    ) +
-    geom_hline(
-      yintercept=c(1.5, 0.5),
-      linewidth=c(0.4, 0.7)
-    ) +
-    coord_cartesian(
-      xlim=c(-0.1, 3.25),
-      ylim=c(0.3, max(d$y) + 1.7),
-      clip="off"
-    ) +
-    labs(
-      title="MIA passenger enplanements and device calibration, 2024",
-      #subtitle="2024",
-      caption=paste(
-        "Note: Passengers per observed device equals passenger enplanements",
-        "divided by observed device enplanements."
-      )
-    ) +
-    theme_void() +
-    theme(
-      plot.title=element_text(size=13),
-      plot.subtitle=element_text(size=10),
-      plot.caption=element_text(hjust=0, size=8),
-      plot.margin=margin(10, 15, 10, 10)
-    )
-
-  print(p)
-
-  # Uncomment to export:
-  # dir.create("Figures", showWarnings=FALSE)
-  # ggsave(
-  #   "Figures/mia_enplanements_table.pdf",
-  #   plot=p,
-  #   width=7.5,
-  #   height=6.5
-  # )
+  print(d)
 })
 
 ggplot( # Share of devices classified as enplaned by distance
@@ -520,7 +566,7 @@ ggplot( # Median net difference in driving vs device time by distance from MIA
 
 
 # Home location stats --------------------------------------------------------------
-dfst |> # Origin CBG representation in park-visit device data
+dfst_model |> # Origin CBG representation in park-visit device data
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y"))
@@ -538,7 +584,8 @@ dfst |> # Origin CBG representation in park-visit device data
   labs(x="Frequency of visitor-days across all parks by CBG", y="Share of CBGs",
        title = "Frequency of visitor-days to all parks by census block group, 2024" )
 
-dfst |> # Share of visitors by distance band
+
+dfst_model |> # Share of visitors by distance band
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
@@ -572,11 +619,12 @@ dfst |> # Share of visitors by distance band
   ) +
   theme_minimal()
 
-dfst |> # Home location by state
+dfst_model |> # Home location by state and Miami metro
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-    state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2)
+    state_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 2),
+    county_fips=substr(CENSUS_BLOCK_GROUP_ID, 1, 5)
   ) |>
   filter(year == 2024, !is.na(state_fips)) |>
   left_join(
@@ -586,7 +634,15 @@ dfst |> # Home location by state
     ),
     by="state_fips"
   ) |>
-  group_by(state) |>
+  filter(!is.na(state)) |>
+  mutate(
+    origin=case_when(
+      state=="FL" & county_fips %in% c("12011","12086","12099") ~ "Miami metro",
+      state=="FL" ~ "Rest of Florida",
+      TRUE ~ state
+    )
+  ) |>
+  group_by(origin) |>
   summarise(
     annual_visitor_days=sum(calibrated_visits, na.rm=TRUE),
     observed_device_days=n(),
@@ -595,8 +651,10 @@ dfst |> # Home location by state
     .groups="drop"
   ) |>
   mutate(share_visitor_days=annual_visitor_days / sum(annual_visitor_days)) |>
-  slice_max(annual_visitor_days, n=20) |>
-  ggplot(aes(annual_visitor_days, reorder(state, annual_visitor_days))) +
+  arrange(desc(annual_visitor_days)) |>
+  mutate(other_rank=cumsum(!origin %in% c("Miami metro","Rest of Florida"))) |>
+  filter(origin %in% c("Miami metro","Rest of Florida") | other_rank<=8) |>
+  ggplot(aes(annual_visitor_days, reorder(origin, annual_visitor_days))) +
   geom_col() +
   geom_text(aes(label=scales::percent(share_visitor_days, accuracy=0.1)), hjust=-0.1, size=3) +
   scale_x_continuous(labels=scales::comma, expand=expansion(mult=c(0, 0.18))) +
@@ -604,13 +662,13 @@ dfst |> # Home location by state
   labs(
     x="Annual visitor-days",
     y=NULL,
-    title="Estimated visitor-days by origin state",
-    subtitle="Top 20 states by annual visitor-days"
+    title="Estimated visitor-days by origin",
+    subtitle="Miami metro, rest of Florida, and top 8 other states"
   ) +
   theme_minimal() +
   theme(plot.margin=margin(5.5, 35, 5.5, 5.5))
 
-dfst |> # One-way travel-distance distributions for highest- and lowest-visitation parks
+dfst_model |> # One-way travel-distance distributions for highest- and lowest-visitation parks
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
@@ -619,7 +677,7 @@ dfst |> # One-way travel-distance distributions for highest- and lowest-visitati
   ) |>
   filter(year == 2024, !is.na(distance_km), is.finite(distance_km), distance_km >= 0) |>
   inner_join(
-    dfst |>
+    dfst_model |>
       st_drop_geometry() |>
       mutate(
         year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
@@ -685,14 +743,14 @@ dfst |> # One-way travel-distance distributions for highest- and lowest-visitati
   ) +
   theme_minimal()
 
-dfst |> # One-way travel-distance distributions for shortest- and furthest-travel-distance parks
+dfst_model |> # One-way travel-distance distributions for shortest- and furthest-travel-distance parks
   st_drop_geometry() |>
   mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
          FEATUREID=trimws(as.character(FEATUREID)),
          distance_km=outbound_distance_m/1000) |>
   filter(year==2024, !is.na(distance_km), is.finite(distance_km), distance_km>=0) |>
   inner_join(
-    dfst |>
+    dfst_model |>
       st_drop_geometry() |>
       mutate(year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
              FEATUREID=trimws(as.character(FEATUREID)),
@@ -755,17 +813,12 @@ dfst |> # One-way travel-distance distributions for shortest- and furthest-trave
 
 
 # Travel cost summary stats ----------------------------------------------
-local({
-  d <- dfst |>
+local({ # Distribution of estimated travel costs
+  d <- dfst_model |>
     st_drop_geometry() |>
     mutate(
       year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
-      distance_miles=distance_m / 1609.344,
-      duration_hours=duration_min / 60,
-      hourly_income=med_hh_income / travel_cost_params$annual_work_hours,
-      travel_cost=
-        travel_cost_params$auto_cost_per_mile * distance_miles +
-        travel_cost_params$vot_fraction * hourly_income * duration_hours
+      travel_cost=rum_travel_cost_dollars
     ) |>
     filter(year == 2024, !is.na(travel_cost), is.finite(travel_cost), travel_cost >= 0)
 
@@ -787,31 +840,21 @@ local({
     theme_minimal()
 })
 
-dfst |>
+dfst_model |> # Travel cost distribution for highest and lowest parks
   st_drop_geometry() |>
   mutate(
     year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
     FEATUREID=trimws(as.character(FEATUREID)),
-    distance_miles=distance_m / 1609.344,
-    duration_hours=duration_min / 60,
-    hourly_income=med_hh_income / travel_cost_params$annual_work_hours,
-    travel_cost=
-      travel_cost_params$auto_cost_per_mile * distance_miles +
-      travel_cost_params$vot_fraction * hourly_income * duration_hours
+    travel_cost=rum_travel_cost_dollars
   ) |>
   filter(year == 2024, !is.na(travel_cost), is.finite(travel_cost), travel_cost >= 0) |>
   inner_join(
-    dfst |>
+    dfst_model |>
       st_drop_geometry() |>
       mutate(
         year=as.integer(format(as.Date(DAY_IN_FEATURE), "%Y")),
         FEATUREID=trimws(as.character(FEATUREID)),
-        distance_miles=distance_m / 1609.344,
-        duration_hours=duration_min / 60,
-        hourly_income=med_hh_income / travel_cost_params$annual_work_hours,
-        travel_cost=
-          travel_cost_params$auto_cost_per_mile * distance_miles +
-          travel_cost_params$vot_fraction * hourly_income * duration_hours
+        travel_cost=rum_travel_cost_dollars
       ) |>
       filter(year == 2024, !is.na(travel_cost), is.finite(travel_cost), travel_cost >= 0) |>
       group_by(FEATUREID, Name) |>
@@ -864,7 +907,535 @@ dfst |>
   ) +
   theme_minimal()
 
-print(income_fallback_summary)
+local({ # Income data sources
+  d<-readr::read_csv(
+    "Data/intermediate/cbg_income_acs5_2024.csv",
+    col_types=readr::cols(
+      income_source=readr::col_character(),
+      .default=readr::col_skip()
+    ),
+    show_col_types=FALSE
+  ) |>
+    count(income_source,name="n_cbgs") |>
+    mutate(
+      pct_cbgs=100*n_cbgs/sum(n_cbgs),
+      income_source=recode(
+        income_source,
+        block_group="Block group",
+        tract="Census tract",
+        county="County",
+        unavailable="Unavailable"
+      ),
+      income_source=factor(
+        income_source,
+        levels=c("Block group","Census tract","County","Unavailable")
+      )
+    ) |>
+    arrange(income_source) |>
+    gt::gt() |>
+    gt::cols_label(
+      income_source="Income data source",
+      n_cbgs="CBGs",
+      pct_cbgs="Share (%)"
+    ) |>
+    gt::fmt_number(columns=n_cbgs,decimals=0) |>
+    gt::fmt_number(columns=pct_cbgs,decimals=1) |>
+    gt::cols_align(align="right",columns=c(n_cbgs,pct_cbgs)) |>
+    project_table(
+      title="Geographic sources of median household income estimates, 2024",
+      note="Income estimates are taken from census block groups where available, with census tract and county estimates used when block-group estimates are unavailable."
+    )
+
+  print(d)
+})
+
+
+# RUM tables and figures -------------------------------------------------
+local({ # Destination-choice regression table
+  models<-list(
+    "all_travel"=rum_results$models$site_progression$Extent[["Travel cost"]],
+    "all_area"=rum_results$models$site_progression$Extent[["Park area"]],
+    "all_extent"=rum_results$models$site_extent,
+    "all_presence"=rum_results$models$site_presence,
+    "florida_extent"=rum_results$models$florida$site_extent
+  )
+
+  labels<-c(
+    travel_cost_dollars="Round-trip travel cost ($)",
+    mangrove_presence="Mangroves present",
+    log_mangrove_ha="Log(1 + mangrove ha)",
+    log_beach_ha="Log(1 + beach ha)",
+    tree_canopy_pct="Tree canopy (%)",
+    impervious_pct="Impervious cover (%)",
+    log_park_area="Log(park ha)",
+    sports_facilities="Sports facilities present",
+    marine_waterfront="Marine waterfront"
+  )
+
+  fmt<-function(x) {
+    ifelse(abs(x)<.01 & x!=0,sprintf("%.5f",x),
+           ifelse(abs(x)<.1 & x!=0,sprintf("%.4f",x),sprintf("%.3f",x)))
+  }
+
+  d<-purrr::imap_dfr(models,\(fit,model) {
+    ct<-fixest::coeftable(fit)
+    tibble(
+      term=rownames(ct),
+      estimate=as.numeric(ct[,1]),
+      se=as.numeric(ct[,2]),
+      p_value=as.numeric(ct[,4]),
+      model=model
+    )
+  }) |>
+    mutate(
+      stars=case_when(
+        p_value<.001~"***",
+        p_value<.01~"**",
+        p_value<.05~"*",
+        TRUE~""
+      ),
+      cell=paste0(fmt(estimate),stars," (",fmt(se),")")
+    ) |>
+    dplyr::select(term,model,cell) |>
+    pivot_wider(names_from=model,values_from=cell)
+
+  d<-tibble(term=names(labels)) |>
+    left_join(d,by="term")
+
+  obs<-tibble(term=c("Observations","AIC"))
+  for (model in names(models)) {
+    obs[[model]]<-scales::comma(c(
+      stats::nobs(models[[model]]),
+      stats::AIC(models[[model]])
+    ),accuracy=1)
+  }
+
+  d<-bind_rows(d,obs) |>
+    mutate(term=coalesce(unname(labels[term]),term)) |>
+    rename(Characteristic=term) |>
+    gt::gt() |>
+    gt::tab_spanner(
+      label="All origins",
+      columns=c(all_travel,all_area,all_extent,all_presence)
+    ) |>
+    gt::tab_spanner(
+      label="Florida origins",
+      columns=florida_extent
+    ) |>
+    gt::cols_label(
+      all_travel="(1) Travel cost",
+      all_area="(2) + Park area",
+      all_extent="(3) Full extent",
+      all_presence="(4) Full presence",
+      florida_extent="(5) Full extent"
+    ) |>
+    gt::sub_missing(missing_text="") |>
+    gt::cols_align("right",columns=-Characteristic) |>
+    project_table(
+      title="Destination-choice models",
+      note="All models use Psuedo-Poisson Maximum Likelihood with origin CBG fixed effects and standard errors clustered by origin CBG and park. Lower AIC indicates better relative fit among models estimated on the same sample. * p < 0.05; ** p < 0.01; *** p < 0.001."
+    )
+
+  print(d)
+})
+
+local({ # Trip-frequency regression table
+  models<-list(
+    "all_origins"=rum_results$models$frequency_extent,
+    "florida_origins"=rum_results$models$florida$frequency_extent
+  )
+
+  labels<-c(
+    monetary_iv_extent="Monetary inclusive value ($)",
+    log_income="Log median household income",
+    "(Intercept)"="Intercept"
+  )
+
+  fmt<-function(x) {
+    ifelse(abs(x)<.01 & x!=0,sprintf("%.5f",x),
+           ifelse(abs(x)<.1 & x!=0,sprintf("%.4f",x),sprintf("%.3f",x)))
+  }
+
+  d<-purrr::imap_dfr(models,\(fit,model) {
+    ct<-fixest::coeftable(fit)
+    tibble(
+      term=rownames(ct),
+      estimate=as.numeric(ct[,1]),
+      se=as.numeric(ct[,2]),
+      p_value=as.numeric(ct[,4]),
+      model=model
+    )
+  }) |>
+    mutate(
+      stars=case_when(
+        p_value<.001~"***",
+        p_value<.01~"**",
+        p_value<.05~"*",
+        TRUE~""
+      ),
+      cell=paste0(fmt(estimate),stars," (",fmt(se),")")
+    ) |>
+    dplyr::select(term,model,cell) |>
+    pivot_wider(names_from=model,values_from=cell)
+
+  d<-tibble(term=names(labels)) |>
+    left_join(d,by="term")
+
+  obs<-tibble(
+    term=c("Observations (CBGs)","Population represented"),
+    all_origins=scales::comma(c(
+      stats::nobs(models$all_origins),
+      sum(rum_results$data$cbg_annual$cbg_population)
+    ),accuracy=1),
+    florida_origins=scales::comma(c(
+      stats::nobs(models$florida_origins),
+      rum_results$tables$florida_coverage$represented_population
+    ),accuracy=1)
+  )
+
+  d<-bind_rows(d,obs) |>
+    mutate(term=coalesce(unname(labels[term]),term)) |>
+    rename(Characteristic=term) |>
+    gt::gt() |>
+    gt::cols_label(
+      all_origins="All origins",
+      florida_origins="Florida origins"
+    ) |>
+    gt::sub_missing(missing_text="") |>
+    gt::cols_align("right",columns=-Characteristic) |>
+    project_table(
+      title="Annual trip-frequency models",
+      note="Dependent variable: calibrated annual visitor-days per CBG. PPML with log CBG population as an offset and heteroskedasticity-robust standard errors. Population includes nonvisiting residents, so aggregate per-capita demand reflects both participation (extensive margin) and visit frequency among participants (intensive margin), without estimating these margins separately. Monetary inclusive values are derived from the corresponding mangrove-extent destination-choice models, re-estimated separately for Florida. * p < 0.05; ** p < 0.01; *** p < 0.001."
+    )
+
+  print(d)
+})
+
+local({ # Appendix - Mangrove coefficient sensitivity
+  d<-rum_results$tables$site_sensitivity |>
+    mutate(
+      mangrove_measure=if_else(
+        grepl("presence",specification),"Presence","Extent"
+      ),
+      increment=if_else(mangrove_measure=="Presence",1,log(2)),
+      ci_low=exp((mangrove_coefficient-1.96*se)*increment),
+      ci_high=exp((mangrove_coefficient+1.96*se)*increment),
+      origin_sample=if_else(
+        grepl("Florida",specification),"Florida origins","All origins"
+      ),
+      model=case_when(
+        grepl("quadratic",specification)~"Extent (quadratic park area)",
+        mangrove_measure=="Presence"~"Presence",
+        TRUE~"Extent"
+      ),
+      n=scales::comma(observations),
+      p=if_else(p_value<.001,"<0.001",sprintf("%.3f",p_value))
+    ) |>
+    dplyr::select(
+      origin_sample,model,n,mangrove_coefficient,se,p,odds_ratio,
+      ci_low,ci_high,monetary_equivalent
+    ) |>
+    gt::gt() |>
+    gt::cols_label(
+      origin_sample="Origin sample",
+      model="Specification",
+      n="N",
+      mangrove_coefficient="Coefficient",
+      se="SE",
+      p="p-value",
+      odds_ratio="Odds ratio",
+      ci_low="95% CI low",
+      ci_high="95% CI high",
+      monetary_equivalent="Dollar equivalent"
+    ) |>
+    gt::fmt_number(
+      columns=c(mangrove_coefficient,se,odds_ratio,ci_low,ci_high),
+      decimals=3
+    ) |>
+    gt::fmt_number(columns=monetary_equivalent,decimals=2) |>
+    gt::cols_align(
+      "right",
+      columns=c(n,mangrove_coefficient,se,p,odds_ratio,
+                ci_low,ci_high,monetary_equivalent)
+    ) |>
+    project_table(
+      title="Mangrove coefficient sensitivity",
+      note="Presence: absent versus present. Extent: 0 versus 1 ha. Confidence intervals use park- and origin-clustered standard errors. Dollar equivalents represent conditional destination utility, not aggregate annual welfare."
+    )
+
+  print(d)
+})
+
+# local({ # Conditional monetary equivalents
+#   d<-rum_results$tables$mangrove_money |>
+#     dplyr::select(
+#       model,mangrove_change,money_equivalent_dollars,ci_low,ci_high
+#     ) |>
+#     gt::gt() |>
+#     gt::cols_label(
+#       model="Model",
+#       mangrove_change="Mangrove change",
+#       money_equivalent_dollars="Dollar equivalent",
+#       ci_low="95% CI low",
+#       ci_high="95% CI high"
+#     ) |>
+#     gt::fmt_number(
+#       columns=c(money_equivalent_dollars,ci_low,ci_high),
+#       decimals=2
+#     ) |>
+#     gt::cols_align(
+#       "right",
+#       columns=c(money_equivalent_dollars,ci_low,ci_high)
+#     ) |>
+#     project_table(
+#       title="Conditional monetary equivalents of mangrove attributes",
+#       note="Dollar equivalents are derived from the destination-choice utility and travel-cost coefficients. They are not aggregate annual welfare estimates."
+#     )
+
+#   print(d)
+# })
+
+# local({ # Destination-choice effects
+#   print(rum_results$figures$site_choice_odds)
+# })
+
+local({ # Frequency model fit - ################## revisit this with alt specifications of the trip frequency model
+  print(rum_results$figures$frequency_fit)
+})
+
+
+
+
+local({ # One-hectare mangrove restoration welfare
+  cap<-20
+
+  d<-rum_results$tables$site_marginals |>
+    filter(
+      !is.na(mangrove_welfare_1ha),
+      calibrated_site_visitor_days>0
+    ) |>
+    arrange(desc(abs(linked_annual_dollars_1ha))) |>
+    mutate(
+      site_label=paste0(
+        stringr::str_to_title(site_name),
+        " (",scales::comma(calibrated_site_visitor_days,accuracy=1),")"
+      ),
+      site=factor(site_label,levels=rev(site_label)),
+      welfare_per_visit=linked_annual_dollars_1ha/calibrated_site_visitor_days
+    )
+
+  components<-d |>
+    dplyr::select(site,mangrove_welfare_1ha,canopy_welfare_1ha) |>
+    pivot_longer(
+      cols=c(mangrove_welfare_1ha,canopy_welfare_1ha),
+      names_to="component",
+      values_to="value"
+    ) |>
+    mutate(
+      component=recode(
+        component,
+        mangrove_welfare_1ha="Mangroves",
+        canopy_welfare_1ha="Tree canopy"
+      ),
+      measure="A. Annual welfare ($)"
+    )
+
+  net<-bind_rows(
+    d |>
+      transmute(
+        site,
+        measure="A. Annual welfare ($)",
+        value=linked_annual_dollars_1ha,
+        offscale=FALSE
+      ),
+    d |>
+      transmute(
+        site,
+        measure="B. Welfare per calibrated park visitor-day ($)",
+        value=pmax(-cap,pmin(cap,welfare_per_visit)),
+        offscale=abs(welfare_per_visit)>cap
+      )
+  )
+
+  offscale_labels<-d |>
+    filter(abs(welfare_per_visit)>cap) |>
+    transmute(
+      label=paste0(
+        stringr::str_to_title(site_name),
+        " (",scales::dollar(welfare_per_visit,accuracy=.01),")"
+      )
+    ) |>
+    pull(label)
+
+  d<-ggplot() +
+    geom_hline(yintercept=0,linetype="dashed",color="grey60") +
+    geom_col(
+      data=components,
+      aes(x=site,y=value,fill=component),
+      width=0.7
+    ) +
+    geom_point(
+      data=net |> filter(!offscale),
+      aes(x=site,y=value),
+      size=2,
+      color="black"
+    ) +
+    geom_point(
+      data=net |> filter(offscale),
+      aes(x=site,y=value),
+      shape=18,
+      size=3,
+      color="black"
+    ) +
+    facet_wrap(~measure,nrow=1,scales="free") +
+    coord_flip() +
+    scale_x_discrete(drop=FALSE) +
+    scale_fill_manual(
+      values=c("Mangroves"="#B46B55","Tree canopy"="#399980")
+    ) +
+    scale_y_continuous(
+      labels=scales::label_dollar(
+        accuracy=0.01,
+        scale_cut=scales::cut_short_scale()
+      )
+    ) +
+    labs(
+      title="Recreational welfare effects of mangrove restoration",
+      subtitle="One additional hectare at each park; parentheses show calibrated annual visitor-days",
+      x=NULL,
+      y="Change in recreational welfare",
+      fill=NULL,
+      caption=paste0(
+        "Panel B capped at ±$20 for display. Diamonds indicate off-scale values",
+        if (length(offscale_labels)>0) {
+          paste0(": ",paste(offscale_labels,collapse="; "))
+        } else {
+          ""
+        },
+        ".\nAnnual welfare incorporates destination substitution and trip-frequency responses for top 15 affected parks. Per-visit values use baseline calibrated visitor-days at the affected park. Point estimates; no confidence intervals shown."
+      )
+    ) +
+    theme_minimal(base_size=11) +
+    theme(
+      plot.title=element_text(face="bold",size=12),
+      strip.text=element_text(face="bold"),
+      panel.grid.minor=element_blank(),
+      legend.position="bottom",
+      plot.caption=element_text(hjust=0)
+    )
+
+  print(d)
+})
+
+
+local({ # Welfare decomposition of mangrove restoration
+  d<-rum_results$tables$site_responses |>
+    arrange(desc(abs(linked_annual_dollars_1ha))) |>
+    mutate(
+      site_label=paste0(
+        stringr::str_to_title(site_name),
+        " (",scales::comma(calibrated_site_visitor_days,accuracy=1),")"
+      ),
+      site=factor(site_label,levels=rev(site_label))
+    )
+
+  components<-d |>
+    dplyr::select(
+      site,
+      direct_welfare,
+      substitution_welfare,
+      frequency_adjustment
+    ) |>
+    pivot_longer(
+      cols=-site,
+      names_to="component",
+      values_to="value"
+    ) |>
+    mutate(
+      component=recode(
+        component,
+        direct_welfare="Direct destination effect",
+        substitution_welfare="Destination substitution",
+        frequency_adjustment="Trip-frequency adjustment"
+      ),
+      component=factor(
+        component,
+        levels=c(
+          "Direct destination effect",
+          "Destination substitution",
+          "Trip-frequency adjustment"
+        )
+      )
+    )
+
+  d<-ggplot() +
+    geom_hline(
+      yintercept=0,
+      linetype="dashed",
+      color="grey60"
+    ) +
+    geom_col(
+      data=components,
+      aes(x=site,y=value,fill=component),
+      width=0.7
+    ) +
+    geom_point(
+      data=d,
+      aes(x=site,y=net_welfare),
+      size=2,
+      color="black"
+    ) +
+    coord_flip() +
+    scale_fill_manual(
+      values=c(
+        "Direct destination effect"="#B46B55",
+        "Destination substitution"="#399980",
+        "Trip-frequency adjustment"="#769BB7"
+      )
+    ) +
+    scale_y_continuous(
+      labels=scales::label_dollar(
+        accuracy=0.01,
+        scale_cut=scales::cut_short_scale()
+      )
+    ) +
+    labs(
+      title="Welfare decomposition of mangrove restoration",
+      subtitle="One additional hectare at each park; black points indicate net annual welfare",
+      x=NULL,
+      y="Annual welfare change ($)",
+      fill=NULL,
+      caption=paste0(
+        "Direct effect holds baseline destination choices fixed. ",
+        "Substitution measures the welfare recovered through destination adjustment.\n",
+        "The trip-frequency adjustment accounts for changes in total recreation demand. ",
+        "All components use model-predicted calibrated visitor-days.\n",
+        "Parentheses show baseline observed calibrated visitor-days at each park. ",
+        "Point estimates; no confidence intervals shown."
+      )
+    ) +
+    theme_minimal(base_size=11) +
+    theme(
+      plot.title=element_text(face="bold",size=12),
+      panel.grid.minor=element_blank(),
+      legend.position="bottom",
+      plot.caption=element_text(hjust=0)
+    )
+
+  print(d)
+})
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Travel stats viewer -----------------------------------------------------------
 cdf_df<-dfst |>
