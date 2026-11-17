@@ -108,7 +108,12 @@ df<-st_transform(st_read("Data/GIS_data/County_State_National_Municipal_v3.gpkg"
 df$id<-seq_len(nrow(df))
 
 df<-df %>%
-  filter(!id %in% c(357,358))
+  filter(!id %in% c(357,358)) |>
+  mutate(Name = case_match(
+    Name,
+    "Kenneth M.Myers Bayside Park" ~ "Kenneth M. Myers Bayside Park",
+    .default = Name
+  )) 
 
 dfst<-left_join(dfs,df,join_by(FEATUREID == id))
 
