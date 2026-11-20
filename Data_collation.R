@@ -44,6 +44,10 @@ tidycensus::census_api_key(api_key_census, install=FALSE)
 # file.remove("GIS_data.zip")
 # system.time(unzip("tdata-combined.zip", exdir = "."))
 # file.remove("tdata-combined.zip")
+# system.time(unzip("Spectus.zip", exdir = "."))
+# file.remove("Spectus.zip")
+# system.time(unzip("Intercept.zip", exdir = "."))
+# file.remove("Intercept.zip")
 # setwd("..")
 # rm(files, folder, folder_url, dl)
 
@@ -1028,6 +1032,24 @@ cbg_population <- if(file.exists(cbg_population_path)) {
 }
 
 
+# Intercept survey -------------------------------------------------------
+I<-read.csv("Data/Intercept/miami_mangrove_survey_raw.csv")
+I<-I %>%
+  filter(is.na(terminate)) |>
+  filter(!is.na(start_time), !is.na(end_time)) |> 
+  mutate(
+    travel_tot_min = replace_na(travel_hours, 0)*60+replace_na(travel_mins, 0),
+    expense = replace_na(expense_oneway, 0)*2+replace_na(expense_parking, 0),
+    park = case_match(
+    park,
+    "ORP" ~ "Oleta River State Park",
+    "VKP" ~ "Virginia Key Park",
+    "HVP" ~ "Virginia Key Park",
+    "PCP" ~ "Peacock / K. Myers Park",
+    "DTK" ~ "David T. Kennedy Park",
+    .default = park
+  )) 
+
 # GIS data ---------------------------------------------------------------
 # Mangroves
 
@@ -1327,8 +1349,7 @@ df <- df |>
 
 rm(fori,fori_matches)
 
-
-# Waterfront -------------------------------------------------------------
+# Waterfront
 coast<-local({
   shp<-"Data/GIS_data/CUSP shoreline/N25W085.shp"
   coast_crs<-st_layers(shp)$crs[[1]]
