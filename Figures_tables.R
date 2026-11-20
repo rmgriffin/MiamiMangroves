@@ -812,6 +812,300 @@ dfst_model |> # One-way travel-distance distributions for shortest- and furthest
   theme_minimal()
 
 
+local({ # Intercept survey versus mobile-device travel times
+
+  survey<-I |>
+    transmute(
+      Name=as.character(park),
+      travel_time_min=as.numeric(travel_tot_min)
+    ) |>
+    filter(!is.na(Name),is.finite(travel_time_min),
+           travel_time_min>=0)
+
+  if (length(setdiff(unique(survey$Name),unique(dfst_model$Name)))>0) {
+    stop("Unmatched survey parks: ",
+         paste(setdiff(unique(survey$Name),unique(dfst_model$Name)),
+               collapse=", "))
+  }
+
+  bind_rows(
+    survey |>
+      transmute(
+        source=paste0("Intercept survey (n = ",scales::comma(n()),")"),
+        travel_time_min,
+        weight=1
+      ),
+    dfst_model |>
+      st_drop_geometry() |>
+      filter(
+        as.integer(format(as.Date(DAY_IN_FEATURE),"%Y"))==2024,
+        is.finite(outbound_duration_min),
+        outbound_duration_min>=0,
+        is.finite(calibrated_visits),
+        calibrated_visits>0
+      ) |>
+      inner_join(
+        survey |> count(Name,name="n_survey"),
+        by="Name"
+      ) |>
+      group_by(Name) |>
+      mutate(
+        weight=calibrated_visits/sum(calibrated_visits)*first(n_survey)
+      ) |>
+      ungroup() |>
+      transmute(
+        source=paste0("Mobile-device data (n = ",scales::comma(n()),")"),
+        travel_time_min=outbound_duration_min,
+        weight
+      )
+  ) |>
+    group_by(source,travel_time_min) |>
+    summarise(weight=sum(weight),.groups="drop") |>
+    arrange(source,travel_time_min) |>
+    group_by(source) |>
+    mutate(cumulative_share=cumsum(weight)/sum(weight)) |>
+    ungroup() |>
+    ggplot(aes(travel_time_min,cumulative_share,color=source)) +
+    geom_step(linewidth=1) +
+    scale_y_continuous(labels=scales::percent,limits=c(0,1)) +
+    labs(
+      x="One-way travel time (minutes)",
+      y="Cumulative share of visitors",
+      color=NULL,
+      title="Visitor travel times: intercept survey versus mobile-device data",
+      subtitle="Pooled across four intercepted parks",
+      caption=paste(
+        "Mobile-device observations are weighted by calibrated visitor-days,",
+        "with each park's total weight normalized to match its proportion",
+        "of valid intercept survey responses. Sample sizes reflect observed",
+        "records before reweighting."
+      )
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position="bottom",
+      plot.caption=element_text(hjust=0)
+    )
+
+})
+
+local({ # Positive mangrove attributes
+
+  n_valid<-I |>
+    filter(!is.na(pos_mang),str_trim(pos_mang)!="") |>
+    nrow()
+
+  I |>
+    filter(!is.na(pos_mang),str_trim(pos_mang)!="") |>
+    mutate(respondent=row_number()) |>
+    separate_rows(pos_mang,sep=",") |>
+    mutate(pos_mang=str_trim(pos_mang)) |>
+    filter(pos_mang!="") |>
+    distinct(respondent,pos_mang) |>
+    count(pos_mang,name="n") |>
+    mutate(
+      attribute=case_match(
+        pos_mang,
+        "rec_other" ~ "Recreational activities",
+        "Providing_habitat_for_wildlife_" ~ "Wildlife habitat",
+        "Providing_learning_and_teaching" ~ "Learning and teaching",
+        "Providing_cultural_value" ~ "Cultural value",
+        "Providing_connection_to_friends" ~ "Connection to friends and family",
+        "Providing_sense_of_peace" ~ "Peace and relaxation",
+        "Nice_to_look_at" ~ "Scenic value",
+        "other" ~ "Other",
+        .default=pos_mang
+      ),
+      share=n/n_valid,
+      recreation=attribute=="Recreational activities"
+    ) |>
+    ggplot(aes(share,reorder(attribute,share),fill=recreation)) +
+    geom_col(width=.7) +
+    geom_text(
+      aes(label=paste0(scales::percent(share,accuracy=.1),
+                       " (n=",n,")")),
+      hjust=-.1,
+      size=3.5
+    ) +
+    scale_fill_manual(
+      values=c("TRUE"="#399980","FALSE"="grey65"),
+      guide="none"
+    ) +
+    scale_x_continuous(
+      labels=scales::percent,
+      expand=expansion(mult=c(0,.25))
+    ) +
+    labs(
+      x="Share of respondents",
+      y=NULL,
+      title="Perceived positive attributes of mangroves",
+      subtitle=paste0("Respondents answering Q2.4 (n = ",n_valid,")"),
+      caption="Respondents could select up to three attributes; percentages do not sum to 100%."
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title=element_text(face="bold"),
+      panel.grid.major.y=element_blank()
+    )
+
+})
+
+local({ # Mangrove awareness and importance in park choice
+
+  d<-I |>
+    transmute(
+      awareness=case_match(
+        as.character(aware_mang),
+        "Yes" ~ "Aware",
+        "No" ~ "Not aware",
+        .default=NA_character_
+      ),
+      importance=case_match(
+        as.character(factor_visit),
+        "Strongly disagree" ~ "Not a factor",
+        "Disagree" ~ "Minor factor",
+        "Moderate factor" ~ "Moderate factor",
+        "Major factor" ~ "Major factor",
+        "Primary factor" ~ "Primary factor",
+        .default=NA_character_
+      )
+    ) |>
+    filter(!is.na(awareness)) |>
+    mutate(
+      importance=if_else(
+        awareness=="Not aware",
+        "Not asked",
+        coalesce(importance,"No response")
+      )
+    ) |>
+    count(awareness,importance,name="n") |>
+    mutate(
+      y_end=case_match(
+        importance,
+        "Not a factor" ~ 6,
+        "Minor factor" ~ 5,
+        "Moderate factor" ~ 4,
+        "Major factor" ~ 3,
+        "Primary factor" ~ 2,
+        "No response" ~ 1,
+        "Not asked" ~ 0,
+        .default=NA_real_
+      )
+    )
+
+  links<-bind_rows(
+    d |>
+      group_by(awareness) |>
+      summarise(n=sum(n),.groups="drop") |>
+      transmute(
+        awareness,n,
+        x=0,y=3.3,
+        xend=2,
+        yend=if_else(awareness=="Aware",4,0)
+      ),
+    d |>
+      filter(awareness=="Aware") |>
+      transmute(
+        awareness,n,
+        x=2,y=4,
+        xend=4,yend=y_end
+      )
+  )
+
+  labels<-bind_rows(
+    tibble(
+      x=0,y=3.3,
+      label=paste0("All respondents\nn = ",sum(d$n))
+    ),
+    d |>
+      group_by(awareness) |>
+      summarise(n=sum(n),.groups="drop") |>
+      transmute(
+        x=2,
+        y=if_else(awareness=="Aware",4,0),
+        label=paste0(
+          awareness,"\nn = ",n," (",
+          scales::percent(n/sum(d$n),accuracy=.1),")"
+        )
+      ),
+    d |>
+      filter(awareness=="Aware") |>
+      transmute(
+        x=4,y=y_end,
+        label=paste0(
+          importance,"\nn = ",n," (",
+          scales::percent(
+            n/sum(d$n[d$awareness=="Aware"]),
+            accuracy=.1
+          ),")"
+        )
+      )
+  )
+
+  ggplot() +
+    geom_curve(
+      data=links,
+      aes(
+        x=x,y=y,
+        xend=xend,yend=yend,
+        linewidth=n
+      ),
+      curvature=.12,
+      color="grey45",
+      alpha=.75,
+      lineend="round"
+    ) +
+    scale_linewidth(range=c(2,13),guide="none") +
+    geom_label(
+      data=labels,
+      aes(x=x,y=y,label=label),
+      fill="white",
+      color="#29333C",
+      size=3.5,
+      label.padding=grid::unit(.27,"lines"),
+      label.r=grid::unit(.15,"lines"),
+      linewidth=.25,
+      lineheight=.95
+    ) +
+    annotate(
+      "text",
+      x=c(0,2,4),
+      y=7.35,
+      label=c(
+        "All respondents",
+        "Before today, were you aware\nthat there are mangroves\nin this park?",
+        "Was the presence of mangroves\na deciding factor for you\nvisiting the park today?"
+      ),
+      fontface="bold",
+      hjust=c(.5,.5,.5),
+      size=3.8,
+      lineheight=1.05
+    ) +
+    coord_cartesian(
+      xlim=c(-.5,4.8),
+      ylim=c(-.7,7.8),
+      clip="off"
+    ) +
+    labs(
+      title="Mangrove awareness and importance in park visitation",
+      subtitle="Flow thickness represents the number of respondents",
+      caption="Respondents unaware of mangroves were not asked about their importance"
+    ) +
+    theme_void(base_size=11) +
+    theme(
+      plot.title=element_text(face="bold",size=13),
+      plot.subtitle=element_text(color="grey40"),
+      plot.caption=element_text(
+        hjust=0,
+        color="grey45",
+        margin=margin(t=12)
+      ),
+      plot.margin=margin(25,50,15,15),
+      legend.position="none"
+    )
+
+})
+
 # Travel cost summary stats ----------------------------------------------
 local({ # Distribution of estimated travel costs
   d <- dfst_model |>
